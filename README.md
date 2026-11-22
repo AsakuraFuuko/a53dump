@@ -159,7 +159,8 @@ derivative of [`drakmor/ppr-patch`](https://github.com/drakmor/ppr-patch)'s
 `a53_transport.c`, which is GPL-3.0. Publishing this work under MIT would be a
 license violation, so the whole work is GPL-3.0-or-later.
 
-- **drakmor/ppr-patch** — transport layer, `ppr_patch.h`, PPR profile layouts.
+- **drakmor/ppr-patch** — the transport layer (`src/a53_transport.c`). The PPR
+  patch entry points were removed; only the SDBGP packet path remains.
 - **astrelsky/mp4rw** — SDBGP command naming, the `0x43` read idea, and the
   `0x88100000 / 0x88440000 / 0x8A000000` image-base candidate list.
 

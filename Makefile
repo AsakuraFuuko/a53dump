@@ -19,7 +19,7 @@ SRC := src/main.c src/profile.c src/a53_transport.c
 
 all: $(ELF)
 
-$(ELF): $(SRC) src/profile.h src/a53_transport.h src/ppr_patch.h
+$(ELF): $(SRC) src/profile.h src/a53_transport.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRC)
 	$(STRIP) --strip-all $@
 

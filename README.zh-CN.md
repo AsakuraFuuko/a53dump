@@ -148,7 +148,8 @@ payload 的做法是**拒绝**，而不是猜。
 **修改衍生物**，上游是 GPL-3.0。以 MIT 发布本项目构成许可证违规，因此整体采用
 GPL-3.0-or-later。
 
-- **drakmor/ppr-patch** —— 传输层、`ppr_patch.h`、PPR profile 布局。
+- **drakmor/ppr-patch** —— 传输层（`src/a53_transport.c`）。PPR 补丁入口已删除，
+  只保留 SDBGP 包路径。
 - **astrelsky/mp4rw** —— SDBGP 命令命名、`0x43` 读法思路、
   `0x88100000 / 0x88440000 / 0x8A000000` 镜像基址候选表。
 
