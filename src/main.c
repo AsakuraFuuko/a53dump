@@ -39,6 +39,10 @@
  *           build without arming anything.
  *   one     arm + read + restore in a single run. Default dump primitive;
  *           writes at most one image-sized window.
+ *   elfmeta read the ELF metadata that lives outside the loaded image:
+ *           .shstrtab and the section header table. Needs the image on disk
+ *           (OUT_PATH) to learn e_shoff/e_shnum/e_shstrndx, then writes
+ *           META_SHSTR and META_SHDRS, which splice into the image directly.
  *   scan    read-only: scan the host-visible MDSR window for the magic and
  *           report usable ds_pa candidates. Zero writes; use it to add a build.
  *   dump    multi-run driver: arm, read one chunk, restore, record the cursor
@@ -69,6 +73,10 @@
 #define SAVE_PATH  "/data/a53dump.save"
 #define STATE_PATH "/data/a53dump.state"
 #define OUT_PATH   "/data/a53dump.bin"
+#define VA_PATH    "/data/a53dump.va"
+#define LEN_PATH   "/data/a53dump.len"
+#define META_SHSTR "/data/a53dump.shstrtab.bin"
+#define META_SHDRS "/data/a53dump.shdrs.bin"
 
 #define CMD_MSGBUF  0x01190201U
 #define CMD_GET_CONF 0x01010010U
@@ -448,8 +456,17 @@ static int mode_one(uint64_t dmap, const struct a53_profile *p) {
     if (transport_up() != 0) return 1;
     remove(OUT_PATH);
     /* Default: the whole image in one request. */
-    uint64_t va  = read_hex_file("/data/a53dump.va", p->image);
-    uint64_t len = read_hex_file("/data/a53dump.len", p->size);
+    /* The va/len overrides let the same primitive reach regions outside the
+     * image (.shstrtab, section headers). They are one-shot on purpose: a stale
+     * file would silently make the next whole-image run read the wrong VA. */
+    uint64_t va  = read_hex_file(VA_PATH,  p->image);
+    uint64_t len = read_hex_file(LEN_PATH, p->size);
+    if (va != p->image || len != p->size)
+        lg("override va=%#llx len=%#llx (image is %#llx + %#llx)",
+           (unsigned long long)va, (unsigned long long)len,
+           (unsigned long long)p->image, (unsigned long long)p->size);
+    remove(VA_PATH);
+    remove(LEN_PATH);
     if (len == 0 || len > READ_MAX) { lg("FATAL: bad len=%#llx", (unsigned long long)len); return 1; }
     uint64_t got = 0;
     if (do_read(dmap, p, va, len, &got) != 0) return 1;
@@ -581,6 +598,208 @@ static int mode_scan(uint64_t dmap, const char *release) {
     return 0;
 }
 
+/* ------------------------------------------------------------------ elfmeta
+ *
+ * The loaded image stops at the last PT_LOAD, but an ELF's section header table
+ * and its string table sit past that point. Both are still plain EL3 VAs, so
+ * the same read primitive reaches them -- provided the landing point stays in
+ * a harmless range.
+ *
+ * Offsets come from the image we already have on disk, never from constants:
+ *   e_shoff    (u64 @ 0x28)   section header table file offset
+ *   e_shnum    (u16 @ 0x3c)   number of section headers
+ *   e_shentsize(u16 @ 0x3a)   size of one section header
+ *   e_shstrndx (u16 @ 0x3e)   which header describes .shstrtab
+ *
+ * Everything is expressed relative to the image base, so only the profile's
+ * IMAGE value is version dependent.
+ */
+
+static int read_u16(const uint8_t *b, size_t off, uint16_t *out) {
+    if (!b || !out) return -1;
+    *out = (uint16_t)b[off] | ((uint16_t)b[off + 1] << 8);
+    return 0;
+}
+
+static int read_u32(const uint8_t *b, size_t off, uint32_t *out) {
+    if (!b || !out) return -1;
+    *out = (uint32_t)b[off] | ((uint32_t)b[off + 1] << 8) |
+           ((uint32_t)b[off + 2] << 16) | ((uint32_t)b[off + 3] << 24);
+    return 0;
+}
+
+static int read_u64(const uint8_t *b, size_t off, uint64_t *out) {
+    if (!b || !out) return -1;
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | b[off + (size_t)i];
+    *out = v;
+    return 0;
+}
+
+/* Read [va, va+len) into *dst, then drop the spill the handler appended. */
+static int read_exact(uint64_t dmap, const struct a53_profile *p,
+                      uint64_t va, uint64_t len, uint8_t *dst) {
+    if (gate_landing(p, va, len) != 0) return -1;
+    if (arm(dmap, p, va, len) != 0) return -1;
+
+    uint64_t got = 0;
+    int rc = fetch_once(&got, dst, READ_MAX + 0x1000);
+
+    uint64_t o = 0, sz = 0, l = 0;
+    if (load_fields(&o, &sz, &l) == 0) {
+        uint64_t base = dmap + p->ds_pa;
+        (void)kernel_copyin(&o, (intptr_t)(base + F_OFF),  8);
+        (void)kernel_copyin(&sz, (intptr_t)(base + F_SIZE), 8);
+        (void)kernel_copyin(&l, (intptr_t)(base + F_LAST), 8);
+    } else {
+        restore_baseline(dmap, p);
+    }
+    if (rc != 0) return -1;
+
+    if (got < len) {
+        lg("read va=%#llx: short, got %#llx of %#llx",
+           (unsigned long long)va, (unsigned long long)got,
+           (unsigned long long)len);
+        return -1;
+    }
+    lg("read va=%#llx len=%#llx got=%#llu (spill %#llx)",
+       (unsigned long long)va, (unsigned long long)len,
+       (unsigned long long)got, (unsigned long long)(got - len));
+    return 0;
+}
+
+static int dump_bytes(const char *path, const uint8_t *src, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { lg("FATAL: cannot write %s", path); return -1; }
+    size_t w = fwrite(src, 1, n, f);
+    fclose(f);
+    if (w != n) { lg("FATAL: short write to %s", path); return -1; }
+    lg("wrote %s (%zu B)", path, n);
+    return 0;
+}
+
+static uint8_t g_meta[READ_MAX + 0x1000];
+
+static int mode_elfmeta(uint64_t dmap, const struct a53_profile *p) {
+    if (transport_up() != 0) return 1;
+
+    uint8_t eh[0x40];
+    FILE *f = fopen(OUT_PATH, "rb");
+    if (!f) {
+        lg("FATAL: %s missing; run mode=one first", OUT_PATH);
+        return 1;
+    }
+    size_t n = fread(eh, 1, sizeof(eh), f);
+    fclose(f);
+    /* gate_elf(strict) compares e_phoff against the length it is given, so
+     * pass the real file size rather than the 64-byte header we just read. */
+    uint64_t img_size = 0;
+    if (n == sizeof(eh)) {
+        FILE *sz = fopen(OUT_PATH, "rb");
+        if (sz && fseek(sz, 0, SEEK_END) == 0) {
+            long end = ftell(sz);
+            if (end > 0) img_size = (uint64_t)end;
+        }
+        if (sz) fclose(sz);
+    }
+    if (n != sizeof(eh) || img_size == 0 ||
+        gate_elf(eh, (size_t)img_size, 1) != 0) {
+        lg("VERDICT: BAD_IMAGE");
+        return 1;
+    }
+
+    uint16_t shentsize = 0, shnum = 0, shstrndx = 0;
+    uint64_t shoff = 0;
+    (void)read_u16(eh, 0x3a, &shentsize);
+    (void)read_u16(eh, 0x3c, &shnum);
+    (void)read_u16(eh, 0x3e, &shstrndx);
+    (void)read_u64(eh, 0x28, &shoff);
+    lg("image: shoff=%#llx shnum=%u shentsize=%u shstrndx=%u",
+       (unsigned long long)shoff, shnum, shentsize, shstrndx);
+    if (shentsize < 0x40 || shnum == 0 || shstrndx >= shnum) {
+        lg("VERDICT: BAD_ELF_METADATA");
+        return 1;
+    }
+
+    uint64_t shdrs_len = (uint64_t)shnum * shentsize;
+    if (shdrs_len > READ_MAX) {
+        lg("FATAL: section headers %#llx exceed the read window",
+           (unsigned long long)shdrs_len);
+        return 1;
+    }
+    if (read_exact(dmap, p, p->image + shoff, shdrs_len, g_meta) != 0) {
+        lg("VERDICT: READ_FAILED");
+        return 1;
+    }
+    if (dump_bytes(META_SHDRS, g_meta, (size_t)shdrs_len) != 0) return 1;
+
+    /* Locate .shstrtab's own header and read the string table it describes. */
+    size_t o = (size_t)shstrndx * shentsize;
+    uint32_t sh_type = 0;
+    uint64_t sh_off = 0, sh_size = 0;
+    (void)read_u32(g_meta, o + 0x04, &sh_type);
+    (void)read_u64(g_meta, o + 0x18, &sh_off);
+    (void)read_u64(g_meta, o + 0x20, &sh_size);
+    lg("shstrtab: type=%u off=%#llx size=%#llx",
+       sh_type, (unsigned long long)sh_off, (unsigned long long)sh_size);
+    if (sh_type != 3 || sh_size == 0 || sh_size > READ_MAX) {
+        lg("VERDICT: BAD_SHSTRTAB_HEADER");
+        return 1;
+    }
+    /* The first LANDING_SPILL bytes of .shstrtab are permanent collateral: on
+     * every build examined they already hold A53 log text from earlier reads,
+     * and reading them again cannot restore them. Start past that zone and
+     * write a placeholder for the head so the file still lines up with
+     * sh_offset. The affected sh_name entries are reported by the self-check
+     * below and can be recovered from the program headers. */
+    uint64_t skip = LANDING_SPILL;
+    if (skip >= sh_size) {
+        lg("VERDICT: SHSTRTAB_TOO_SMALL");
+        return 1;
+    }
+    if (read_exact(dmap, p, p->image + sh_off + skip, sh_size - skip,
+                   g_meta + skip) != 0) {
+        lg("VERDICT: READ_FAILED");
+        return 1;
+    }
+    lg("shstrtab head [0, %#llx) left zero (pre-existing log spill)",
+       (unsigned long long)skip);
+    if (dump_bytes(META_SHSTR, g_meta, (size_t)sh_size) != 0) return 1;
+
+    /* Self-check: every sh_name must resolve to a printable character. Read
+     * both artefacts back from disk so the check covers what we actually
+     * shipped, not the in-memory copies. */
+    FILE *hf = fopen(META_SHDRS, "rb");
+    FILE *sf = fopen(META_SHSTR, "rb");
+    if (!hf || !sf) {
+        if (hf) fclose(hf);
+        if (sf) fclose(sf);
+        lg("VERDICT: SELFCHECK_UNAVAILABLE");
+        return 1;
+    }
+    uint32_t good = 0, bad = 0;
+    for (uint32_t i = 0; i < shnum; i++) {
+        uint8_t one[0x40];
+        if (fseek(hf, (long)((size_t)i * shentsize), SEEK_SET) != 0) break;
+        if (fread(one, 1, sizeof(one), hf) != sizeof(one)) break;
+        uint32_t name = 0;
+        (void)read_u32(one, 0x00, &name);
+        if (name >= sh_size) { bad++; continue; }
+        if (fseek(sf, (long)name, SEEK_SET) != 0) break;
+        int c = fgetc(sf);
+        if (c > 0 && c < 0x80) good++; else bad++;
+    }
+    fclose(hf);
+    fclose(sf);
+    lg("sh_name self-check: resolvable=%u unusable=%u of %u", good, bad, shnum);
+    if (good + bad != shnum) {
+        lg("VERDICT: SELFCHECK_INCOMPLETE");
+        return 1;
+    }
+    lg("VERDICT: ELFMETA_OK");
+    return 0;
+}
+
 static int mode_version(void) {
     if (transport_up() != 0) return 1;
     char banner[256] = {0};
@@ -669,9 +888,10 @@ int main(void) {
     if (strcmp(mode, "probe") == 0)   return mode_probe(dmap, &p);
     if (strcmp(mode, "one") == 0)     return mode_one(dmap, &p);
     if (strcmp(mode, "dump") == 0)    return mode_dump(dmap, &p);
+    if (strcmp(mode, "elfmeta") == 0) return mode_elfmeta(dmap, &p);
     if (strcmp(mode, "restore") == 0) return mode_restore(dmap, &p);
 
     lg("FATAL: unknown mode '%s'", mode);
-    lg("modes: version | scan | base | probe | one | dump | restore");
+    lg("modes: version | scan | base | probe | one | elfmeta | dump | restore");
     return 1;
 }

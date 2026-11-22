@@ -105,6 +105,7 @@ payload 启动时只读一次 mode 文件，换模式需要重新 `loadpayload`�
 | `base` | **否** | 解析 profile、过第 1 道门、打印 MDSR 字段 |
 | `probe` | **否** | 发一次 `0x01190201`，把文本长度与环游标比对 |
 | `one` | 是 | arm → 读整镜像 → 还原 → 按 `SIZE` 截断 |
+| `elfmeta` | 是 | 读映像之外的 `.shstrtab` 与 section header 表 |
 | `dump` | 是 | 分片驱动；仅在 `landing` 落在被读区间**之外**时可用 |
 | `restore` | 是 | 还原保存的 MDSR 字段 |
 
@@ -131,13 +132,36 @@ payload 的做法是**拒绝**，而不是猜。
 | 路径 | 内容 |
 |---|---|
 | `/data/a53dump.bin` | `one`：整镜像并按 `SIZE` 截断；`dump`：追加 |
+| `/data/a53dump.shstrtab.bin` | `elfmeta`：节名字符串表 |
+| `/data/a53dump.shdrs.bin` | `elfmeta`：section header 表 |
 | `/data/a53dump.log` | 每次运行追加 |
 | `/data/a53dump.save` | arming 前的 MDSR 字段 |
 | `/data/a53dump.state` | `dump` 的续读游标 |
 | `/data/a53dump.profile` | 可选的按版本覆盖 |
 
-产物只是**加载映像**。要拼成能 `readelf` 的 ELF，还需要 section header 表与
-`.shstrtab`，两者都在映像之外。
+`one` 只给**加载映像**。要拼成能 `readelf` 的 ELF，接着跑 `elfmeta`，然后拼装：
+
+```python
+import struct
+img = open('a53dump.bin', 'rb').read()
+sh  = open('a53dump.shstrtab.bin', 'rb').read()
+hd  = bytearray(open('a53dump.shdrs.bin', 'rb').read())
+
+SHSTR_OFF = 0x171140          # .shstrtab 的文件偏移，取自 shdr[shstrndx]
+SHOFF     = struct.unpack_from('<Q', img, 0x28)[0]
+
+hd[0:64] = b'\0' * 64        # sec[0] 按定义是 SHT_NULL
+struct.pack_into('<I', hd, 64, 0)  # sec[1].sh_name：表头部分已丢失
+
+out = bytearray(b'\0' * (SHOFF + len(hd)))
+out[0:len(img)] = img
+out[SHSTR_OFF:SHSTR_OFF + len(sh)] = sh
+out[SHOFF:SHOFF + len(hd)] = hd
+open('a53_complete.elf', 'wb').write(bytes(out))
+```
+
+`.shstrtab` 的前 `0x8c` 字节是**永久性损伤**，`elfmeta` 会把它置零；受影响的
+`sh_name` 会由自检报告出来。两种情况下 `readelf -h` 都无警告。
 
 ---
 

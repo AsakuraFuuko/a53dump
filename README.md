@@ -112,6 +112,7 @@ The payload reads its mode file once at startup, so a mode change needs a fresh
 | `base` | **no** | resolve profile, run gate 1, print the MDSR fields |
 | `probe` | **no** | send `0x01190201` once and compare the text length against the ring cursor |
 | `one` | yes | arm, read the whole image, restore, truncate to `SIZE` |
+| `elfmeta` | yes | read `.shstrtab` and the section header table (outside the image) |
 | `dump` | yes | chunked driver; only usable when `landing` falls *outside* the region read |
 | `restore` | yes | restore the saved MDSR fields |
 
@@ -141,14 +142,38 @@ confirmed statically; 13.60 additionally adds an address-window validator
 | Path | Content |
 |---|---|
 | `/data/a53dump.bin` | `one`: whole image, truncated to `SIZE`; `dump`: appended |
+| `/data/a53dump.shstrtab.bin` | `elfmeta`: section name string table |
+| `/data/a53dump.shdrs.bin` | `elfmeta`: section header table |
 | `/data/a53dump.log` | appended per run |
 | `/data/a53dump.save` | MDSR fields as they were before arming |
 | `/data/a53dump.state` | `dump` cursor |
 | `/data/a53dump.profile` | optional per-build override |
 
-The dump is the loaded image only. Rebuilding a `readelf`-able ELF additionally
-needs the section header table and `.shstrtab`, both of which live outside the
-image.
+`one` yields the loaded image. To rebuild a `readelf`-able ELF, run `elfmeta`
+afterwards and splice the two artefacts in:
+
+```python
+import struct
+img = open('a53dump.bin', 'rb').read()
+sh  = open('a53dump.shstrtab.bin', 'rb').read()
+hd  = bytearray(open('a53dump.shdrs.bin', 'rb').read())
+
+SHSTR_OFF = 0x171140          # .shstrtab file offset, from shdr[shstrndx]
+SHOFF     = struct.unpack_from('<Q', img, 0x28)[0]
+
+hd[0:64] = b'\0' * 64        # sec[0] is SHT_NULL by definition
+struct.pack_into('<I', hd, 64, 0)  # sec[1].sh_name: head of shstrtab is lost
+
+out = bytearray(b'\0' * (SHOFF + len(hd)))
+out[0:len(img)] = img
+out[SHSTR_OFF:SHSTR_OFF + len(sh)] = sh
+out[SHOFF:SHOFF + len(hd)] = hd
+open('a53_complete.elf', 'wb').write(bytes(out))
+```
+
+The first `0x8c` bytes of `.shstrtab` are permanent collateral and are zeroed
+by `elfmeta`; the affected `sh_name` entries are reported by its self-check.
+`readelf -h` reports no warnings either way.
 
 ---
 
