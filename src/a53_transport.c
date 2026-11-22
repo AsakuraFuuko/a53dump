@@ -138,7 +138,8 @@ extern uint64_t sceKernelReadTsc(void);
 static int g_initialized;
 static uint64_t g_mp4sc;
 static uint64_t g_mp4_device;
-/* 命令 ID 覆盖：0 = 用默认 READ_MEMORY。用于扫描其它 SDBGP 命令。 */
+/* Command id override: 0 means the default READ_MEMORY. Used to probe
+ * other SDBGP commands. */
 static uint32_t g_cmd_override;
 static uint64_t g_zcn_bar2;
 static uint64_t g_state_addr;
@@ -398,10 +399,12 @@ static uint32_t round_up_8(uint32_t value) {
 }
 
 int a53_transport_find_device(void) {
-    /* 12.00：bus_data_devices 不可解析（device 在动态 kmalloc 区，多轮扫描失败）。
-     * 覆盖入口：/data/a53sc.txt 里写 mp4sc 的十六进制 VA
-     *   （mp4sc = *(cdev+0xa8)，可用 kpatch 的 capdev 抓到）
-     * 有了 mp4sc 就能沿 +0x18 -> +0x10 取到 zcn_bar2，无需 device 链。 */
+    /* 12.00: bus_data_devices cannot be parsed -- the device lives in a
+     * dynamically allocated kmalloc region and repeated scans fail.
+     *
+     * Override entry: write the hex EL3 VA of mp4sc into /data/a53sc.txt.
+     * With mp4sc we reach zcn_bar2 through +0x18 -> +0x10 and skip the
+     * device list entirely. */
     {
         FILE *ov = fopen("/data/a53sc.txt", "r");
         if (ov) {

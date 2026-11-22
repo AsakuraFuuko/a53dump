@@ -6,7 +6,7 @@
  * drakmor/ppr-patch (GPL-3.0). The whole work is therefore distributed
  * under the GNU General Public License v3 or later. See LICENSE.
  *
- * a53dump — dump the loaded a53.elf image out of the A53 coprocessor.
+ * a53dump -- dump the loaded a53.elf image out of the A53 coprocessor.
  *
  * Channel
  * -------
@@ -532,7 +532,7 @@ static int mode_restore(uint64_t dmap, const struct a53_profile *p) {
     return ok ? 0 : 1;
 }
 
-/* mode=scan — locate DS on an unknown build, without touching A53.
+/* mode=scan -- locate DS on an unknown build, without touching A53.
  *
  * The MDSR structures live in the host-readable window right after TMR12.
  * 12.00 measured [0x605F0000, 0x60800000); the read-only scanner

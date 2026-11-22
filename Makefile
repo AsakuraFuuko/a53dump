@@ -1,4 +1,4 @@
-# a53dump — build with the PS5 payload SDK.
+# a53dump -- build with the PS5 payload SDK.
 #
 #   make                     build a53dump.elf
 #   make SDK=/path/to/sdk    use a different SDK root

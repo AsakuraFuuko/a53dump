@@ -7,7 +7,7 @@
  * under the GNU General Public License v3 or later. See LICENSE.
  */
 /*
- * a53dump profile layer — version identification and per-version constants.
+ * a53dump profile layer -- version identification and per-version constants.
  *
  * Why a profile layer
  * -------------------

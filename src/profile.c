@@ -39,7 +39,7 @@ struct builtin {
     struct a53_landing_range ranges[A53_MAX_LANDING_RANGES];
 };
 
-/* 12.00 landing-safe ranges, all measured (see A53_FIRMWARE_DUMP_HOWTO.md §5). */
+/* 12.00 landing-safe ranges, all measured (see A53_FIRMWARE_DUMP_HOWTO.md section 5). */
 #define R12_0 { 0x88271140ULL, 0x88400000ULL }  /* image end -> EL0 SYSHUB */
 #define R12_1 { 0x885EA0E8ULL, 0x88700000ULL }  /* seg pmax -> LIMIT        */
 #define R12_2 { 0x88701000ULL, 0x88770000ULL }  /* core0 log ring           */
