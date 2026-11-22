@@ -14,6 +14,10 @@ SDBGP command that the host can steer without supplying an address.
 
 ## How it works
 
+A self-contained write-up of the method, including what it is not, lives in
+[`docs/METHOD.md`](docs/METHOD.md).
+
+
 SDBGP command `0x01190201` does **not** accept a host-supplied address. Its
 handler builds the read window from A53's own debug-status structure:
 
