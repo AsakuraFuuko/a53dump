@@ -113,7 +113,7 @@ payload 启动时只读一次 mode 文件，换模式需要重新 `loadpayload`�
 
 ## 添加一个固件版本
 
-内置表在 `src/profile.c`。新增步骤见 [`docs/ADDING_A_RELEASE.md`](docs/ADDING_A_RELEASE.md)，
+内置表在 `src/profile.c`。新增步骤见 [`docs/ADDING_A_RELEASE.zh-CN.md`](docs/ADDING_A_RELEASE.zh-CN.md)，
 简述：
 
 1. `run scan` —— 零写入定位 `DS_PA`

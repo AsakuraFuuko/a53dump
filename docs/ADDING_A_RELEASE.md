@@ -1,5 +1,7 @@
 # Adding a firmware release
 
+**English** | [简体中文](ADDING_A_RELEASE.zh-CN.md)
+
 The dumper needs exactly two per-build values beyond what it discovers itself:
 
 | Value | Meaning |
