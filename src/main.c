@@ -129,47 +129,94 @@ static uint32_t rd32(const uint8_t *p, size_t off) {
            ((uint32_t)p[off + 2] << 16) | ((uint32_t)p[off + 3] << 24);
 }
 
+static int gate_mdsr(uint64_t dmap, const struct a53_profile *p);
+
+/* Read a (hi, lo) field pair at data+off and return hi-lo when it looks like a
+ * direct map. The upper-canonical test rejects the many unrelated byte pairs
+ * that happen to be ordered. */
+static uint64_t dmap_at_offset(uint64_t data, uint64_t off) {
+    uint64_t hi = kread64(data + off + 0x20);
+    uint64_t lo = kread64(data + off + 0x28);
+    if (hi == ~0ULL || lo == ~0ULL) return 0;
+    if (hi <= lo) return 0;
+    uint64_t d = hi - lo;
+    if (d < 0xFFFF00000000ULL) return 0;
+    return d;
+}
+
+/* `kernel_data` has no usable symbol on every release, and when it does not its
+ * base is a fixed distance past `kernel_text`. That distance is not constant:
+ * 13.60 sits 0x0CC0000 after text where 12.00 sits 0x0D50000. */
+static const uint64_t kdata_fallbacks[] = { 0x0D50000ULL, 0x0CC0000ULL };
+
+/* kernel_pmap_store's offset inside kernel_data also moves per release. */
+static const uint64_t pmap_offsets[] = { 0x2E1CFB8ULL, 0x2E88FF8ULL };
+
 /* Direct-map offset for the host side of the A53 DRAM window.
  *
- * Path 1: proc0 -> vm_pmap (version-independent, needs SDK offsets).
- * Path 2: kernel_pmap_store via known per-firmware offset (fallback). */
-static uint64_t dmap_from_kdata(void) {
-    /* Path 1: proc0 -> p_vmspace -> vm_pmap.  Works on any firmware the SDK
-     * has offsets for, without hardcoding kernel_pmap_store addresses. */
+ * Three sources, in order of how much they need to be trusted:
+ *
+ *   1. proc0 -> p_vmspace -> vm_pmap. Version independent, so it is tried first.
+ *   2. kernel_pmap_store at data+off, for each known (base, offset) pair.
+ *
+ * A range check alone is not enough to accept a candidate: the two fields are
+ * adjacent enough that unrelated data passes, and a wrong direct map points the
+ * entire session at the wrong physical memory. With a profile in hand every
+ * candidate is therefore confirmed by reading the MDSR magic at p->ds_pa, which
+ * is what the offset is needed for in the first place. Without a profile (scan
+ * mode) the range check is all there is, and the caller re-checks afterwards. */
+static uint64_t dmap_from_kdata(const struct a53_profile *p) {
+    struct { const char *how; uint64_t d; } cands[8];
+    int n = 0;
+
     uint64_t proc = (uint64_t)(uintptr_t)kernel_get_proc(0);
     if (proc) {
         uint64_t vmspace = kread64(proc + KERNEL_OFFSET_PROC_P_VMSPACE);
         if (vmspace && vmspace != ~0ULL) {
-            uint64_t hi = kread64(vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP + 0x20);
-            uint64_t lo = kread64(vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP + 0x28);
-            if (hi != ~0ULL && lo != ~0ULL && hi > lo)
-                return hi - lo;
+            /* vm_pmap is the pmap itself, so the pair is at +0x20/+0x28. */
+            uint64_t pm = vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP;
+            uint64_t hi = kread64(pm + 0x20);
+            uint64_t lo = kread64(pm + 0x28);
+            if (hi != ~0ULL && lo != ~0ULL && hi > lo && hi - lo >= 0xFFFF00000000ULL) {
+                cands[n].how = "proc0->vm_pmap";
+                cands[n++].d = hi - lo;
+            }
         }
     }
 
-    /* Path 2: kernel_pmap_store at a known offset from KERNEL_ADDRESS_DATA_BASE.
-     * The offset and the data-text gap both vary by firmware. */
     uint64_t data = (uint64_t)(uintptr_t)KERNEL_ADDRESS_DATA_BASE;
     uint64_t text = (uint64_t)(uintptr_t)KERNEL_ADDRESS_TEXT_BASE;
-    uint64_t pmap_off = 0;
-    switch (kernel_get_fw_version() & 0xffff0000U) {
-    case 0x12000000U:
-    case 0x12020000U:
-        if (!data || data <= text) data = text + 0x0D50000ULL;
-        pmap_off = 0x2e1cfb8ULL;
-        break;
-    case 0x13600000U:
-        if (!data || data <= text) data = text + 0x0CC0000ULL;
-        pmap_off = 0x2E88FF8ULL;
-        break;
-    default:
-        return 0;
+    uint64_t bases[3] = { 0, 0, 0 };
+    if (data && data > text) bases[0] = data;
+    for (unsigned i = 0; i < sizeof(kdata_fallbacks)/sizeof(kdata_fallbacks[0]); i++)
+        bases[i + 1] = text + kdata_fallbacks[i];
+
+    for (unsigned b = 0; b < 3 && n < 8; b++) {
+        if (!bases[b]) continue;
+        for (unsigned o = 0; o < sizeof(pmap_offsets)/sizeof(pmap_offsets[0]); o++) {
+            uint64_t d = dmap_at_offset(bases[b], pmap_offsets[o]);
+            if (!d) continue;
+            cands[n].how = "kernel_pmap_store";
+            cands[n++].d = d;
+        }
     }
 
-    uint64_t hi = kread64(data + pmap_off + 0x20);
-    uint64_t lo = kread64(data + pmap_off + 0x28);
-    if (hi == ~0ULL || lo == ~0ULL) return 0;
-    return hi - lo;
+    if (!n) { lg("FATAL: no dmap candidate"); return 0; }
+
+    if (p) {
+        for (int i = 0; i < n; i++) {
+            if (gate_mdsr(cands[i].d, p) == 0) {
+                lg("dmap=%#llx via %s (MDSR verified)",
+                   (unsigned long long)cands[i].d, cands[i].how);
+                return cands[i].d;
+            }
+            lg("dmap candidate %#llx via %s did not reach MDSR",
+               (unsigned long long)cands[i].d, cands[i].how);
+        }
+        lg("FATAL: no dmap candidate reaches the MDSR magic");
+        return 0;
+    }
+    return cands[0].d;
 }
 
 /* ------------------------------------------------------------------ gates */
@@ -1105,14 +1152,10 @@ int main(void) {
     if (strcmp(mode, "version") == 0) return mode_version();
     /* scan needs no profile: it discovers one. */
     if (strcmp(mode, "scan") == 0) {
-        uint64_t dm = dmap_from_kdata();
+        uint64_t dm = dmap_from_kdata(NULL);
         if (!dm) { lg("FATAL: cannot locate direct map"); return 1; }
         return mode_scan(dm, NULL);
     }
-
-    uint64_t dmap = dmap_from_kdata();
-    lg("dmap=%#llx", (unsigned long long)dmap);
-    if (!dmap) { lg("FATAL: cannot locate direct map"); return 1; }
 
     /* Resolve the release from the console itself, not from a host guess.
      * `GET_CONF` is a plain read command; failures here are not fatal for
@@ -1143,6 +1186,12 @@ int main(void) {
         return 2;
     }
     a53_profile_print(&p, lg);
+
+    /* The direct map is resolved with the profile in hand so each candidate
+     * offset can be checked against the MDSR magic before it is trusted. */
+    uint64_t dmap = dmap_from_kdata(&p);
+    lg("dmap=%#llx", (unsigned long long)dmap);
+    if (!dmap) { lg("FATAL: cannot locate direct map"); return 1; }
 
     /* Gate 1 runs for every mode, including base: it is the cheapest way to
      * prove the profile matches the hardware. */

@@ -140,7 +140,7 @@ In `src/profile.c`:
 
 ...
     { "13.60", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x1A0000ULL,
-      0x885EA0E8ULL, 0x88700000ULL, 1, { R13_0 } },
+      0x885ECD0CULL, 0x88700000ULL, 1, { R13_0 } },
 ```
 
 **Do not add the row before `one` succeeds.** A wrong `DS` is caught by gate 1,

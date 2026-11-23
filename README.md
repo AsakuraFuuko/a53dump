@@ -251,10 +251,31 @@ segments in the forward direction.
 4. Write `/data/a53dump.profile`, then run `base` → `probe` → `one`.
 5. Add a row to `g_builtin`.
 
-No release after 12.00 has been tested. The handler referenced by `0x01190201`
-lives at an EL3 VA that is not inside any dump we hold, so it cannot be
-confirmed statically; 13.60 additionally adds an address-window validator
-(`0x2951C`) that 12.00 does not have. The payload refuses rather than guesses.
+### 13.60
+
+A profile row exists, built from a live 13.60 capture
+(`artifacts/external/2026-11-15_kernelkatio_1360/mm_mdsr.txt`, the console's own
+`mp4_layout_seg_set_name` output). It is **not** "12.00 with one segment longer":
+seven of the 31 G6 entries move, and the comments above the `R13_*` defines list
+them. Reusing 12.00's gaps there does not corrupt memory — gate 2 catches it —
+but three fixed-code segments become unreachable because their landings no longer
+fall in a gap.
+
+What is **not** confirmed for 13.60:
+
+| Item | Status |
+|---|---|
+| `DS`, `DS_PA`, `IMAGE`, every gap | from the boot log |
+| `SIZE` | **unconfirmed** — the table still says `0x171140`, which on 12.00 stops short of `.shstrtab` |
+| `A53_DIRECT_LO` (`0x885F0000`) | 12.00 measurement; may differ |
+| address-window validator `0x2951C` | 13.60 adds it; 12.00 has none. It may reject reads that cross windows |
+| `kernel_data` base | 13.60 is `text+0x0CC0000` where 12.00 is `text+0x0D50000`; both are tried |
+
+So `one` on 13.60 should be checked before a full read is trusted: dump the image,
+then read `e_shoff`/`e_shnum`/`e_shentsize` out of the result and confirm the file
+you asked for actually covers the section header table. The payload refuses rather
+than guesses when a profile is missing, but a profile present with a stale `SIZE`
+is only caught that way.
 
 ## Files
 
