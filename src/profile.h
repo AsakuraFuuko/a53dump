@@ -40,6 +40,10 @@
 
 #define A53DUMP_PROFILE_PATH "/data/a53dump.profile"
 
+/* Bytes the handler writes at the landing before the read is served. A landing
+ * range must therefore absorb the whole [landing, landing+LANDING_SPILL) span. */
+#define LANDING_SPILL 0x8cULL
+
 /* A harmless landing range: the handler writes 0x8c log bytes at [lo, hi). */
 struct a53_landing_range {
     uint64_t lo;

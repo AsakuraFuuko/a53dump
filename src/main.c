@@ -90,7 +90,6 @@
 #define MDSR_MAGIC 0xcbb3d18a1aa5daefULL
 
 /* A53 log byte budget per read; measured constant, not a tuning knob. */
-#define LANDING_SPILL 0x8cULL
 
 /* Read cap. The handler is armed with F_LAST = len <= this; the response
  * buffer must hold 0x68 header + len + spill. */
@@ -845,6 +844,110 @@ static int mode_wrap(uint64_t dmap, const struct a53_profile *p) {
 static int read_exact(uint64_t dmap, const struct a53_profile *p,
                       uint64_t va, uint64_t len, uint8_t *dst, int strict);
 
+/* Near the end of the window there is no landing that keeps the spill inside the
+ * mapping. Say whether `va` is in that tail, i.e. only the direct map can read
+ * it. */
+static int reading_tail(uint64_t va, uint64_t hi) {
+    /* No landing at or above hi-LANDING_SPILL keeps its spill inside the
+     * mapping, so from there on only the direct map can read. */
+    return va >= hi - LANDING_SPILL;
+}
+
+/* mode=wsweep -- dump the whole G6 window in five reads.
+ *
+ * The window is 8 MiB and one command read tops out at READ_MAX, so it takes
+ * several. Reading forward with the landing aimed at the NEXT gap is the same
+ * trick as `one`, just with bigger blocks: each block's landing falls in a gap
+ * that the segment table says nothing occupies.
+ *
+ *   [0x88000000,0x880FFF70)   landing 0x880FFF70  gap before a53.elf
+ *   [0x880FFF70,0x882FFF70)   landing 0x882FFF70  gap after a53.elf
+ *   [0x882FFF70,0x884FFF70)   landing 0x884FFF70  gap after dev_data
+ *   [0x884FFF70,0x886FFF70)   landing 0x886FFF70  gap after io_fixed_code
+ *   [0x886FFF70,0x887FFF70)   landing 0x887FFF70  gap after driver_param
+ *
+ * The blocks are sized so every landing lands on a sixteens boundary just inside
+ * a gap (0x...F70 rather than 0x...000), which keeps the 0x8c spill clear of the
+ * segment that follows.
+ *
+ * The last 0x90 bytes of the window cannot be read this way at all: any landing
+ * there is past 0x88800000, which is the end of the mapping, and writing 0x8c
+ * bytes beyond it kills A53 and takes ftpsrv/elfldr with it. That tail goes
+ * through the direct map instead, which writes nothing.
+ */
+static int mode_wsweep(uint64_t dmap, const struct a53_profile *p) {
+    uint64_t lo = read_hex_file("/data/a53dump.start", 0x88000000ULL);
+    uint64_t hi = read_hex_file("/data/a53dump.end",   0x88800000ULL);
+    /* 0x200000 is the transport's copy cap and it reports success while
+     * returning only the first part -- a chunk that size comes back zero-filled
+     * with no error. Stay strictly below it. */
+    uint64_t chunk = read_hex_file("/data/a53dump.chunk", 0x1F0000ULL);
+    if (chunk < 0x10000) chunk = 0x10000;
+    if (chunk >= 0x200000) chunk = 0x1F0000;
+    if (chunk > READ_MAX) chunk = READ_MAX;
+
+    static uint8_t buf[READ_MAX];
+    uint64_t va = read_hex_file(STATE_PATH, lo);
+
+    if (va >= hi) {
+        lg("DONE va=%#llx range=[%#llx, %#llx)", (unsigned long long)va,
+           (unsigned long long)lo, (unsigned long long)hi);
+        lg("VERDICT: WSWEEP_COMPLETE");
+        return 0;
+    }
+
+    /* Pick the largest end that both stays inside chunk budget and leaves the
+     * spill somewhere harmless. Walking it down in 0x10 steps is enough: gaps
+     * are page aligned, so the first hit is within a few iterations. */
+    uint64_t want = (va + chunk < hi) ? va + chunk : (hi > LANDING_SPILL ? hi - LANDING_SPILL : hi);
+    uint64_t end = want;
+    while (end > va && !a53_profile_landing_ok(p, end)) end -= 0x10;
+
+    /* The final LANDING_SPILL bytes of the window have no landing that stays
+     * inside the mapping; the direct map is the only way to reach them. */
+    if (end <= va) {
+        uint64_t tail = reading_tail(va, hi);
+        if (!tail) {
+            lg("FATAL: no safe landing at %#llx", (unsigned long long)va);
+            return 1;
+        }
+        end = hi;
+    }
+    uint64_t len = end - va;
+    int use_direct = (end == hi);
+
+    static uint8_t direct[READ_MAX];
+    if (use_direct || direct_read(dmap, p, va, len, direct)) {
+        if (use_direct && !direct_read(dmap, p, va, len, direct)) {
+            lg("FATAL: tail [%#llx, %#llx) needs the direct map and it refused",
+               (unsigned long long)va, (unsigned long long)end);
+            return 1;
+        }
+        FILE *df = fopen(OUT_PATH, "ab");
+        if (!df) { lg("FATAL: cannot append %s", OUT_PATH); return 1; }
+        fwrite(direct, 1, (size_t)len, df);
+        fclose(df);
+        lg("block [%#llx, %#llx) len=%#llx via=directmap", (unsigned long long)va,
+           (unsigned long long)end, (unsigned long long)len);
+    } else {
+        if (read_exact(dmap, p, va, len, buf, /*strict=*/0) != 0) {
+            lg("VERDICT: WSWEEP_READ_FAILED");
+            return 1;
+        }
+        FILE *f = fopen(OUT_PATH, "ab");
+        if (!f) { lg("FATAL: cannot append %s", OUT_PATH); return 1; }
+        fwrite(buf, 1, (size_t)len, f);
+        fclose(f);
+        lg("block [%#llx, %#llx) len=%#llx landing=%#llx",
+           (unsigned long long)va, (unsigned long long)end,
+           (unsigned long long)len, (unsigned long long)end);
+    }
+
+    write_hex_file(STATE_PATH, end);
+    lg("VERDICT: WBLOCK_OK");
+    return 0;
+}
+
 static int mode_restore(uint64_t dmap, const struct a53_profile *p) {
     uint64_t o = 0, s = 0, l = 0;
     if (load_fields(&o, &s, &l) != 0) return 1;
@@ -1208,9 +1311,10 @@ int main(void) {
     if (strcmp(mode, "dump") == 0)    return mode_dump(dmap, &p);
     if (strcmp(mode, "elfmeta") == 0) return mode_elfmeta(dmap, &p);
     if (strcmp(mode, "wrap") == 0)    return mode_wrap(dmap, &p);
+    if (strcmp(mode, "wsweep") == 0)  return mode_wsweep(dmap, &p);
     if (strcmp(mode, "restore") == 0) return mode_restore(dmap, &p);
 
     lg("FATAL: unknown mode '%s'", mode);
-    lg("modes: version | scan | base | probe | one | forced | elfmeta | dump | wrap | paddr | restore");
+    lg("modes: version | scan | base | probe | one | forced | elfmeta | dump | wsweep | wrap | paddr | restore");
     return 1;
 }

@@ -273,10 +273,16 @@ int a53_profile_resolve(const char *release, struct a53_profile *out) {
     return -1;
 }
 
+/* `landing` is where the handler *starts* writing, not a point: the whole
+ * [landing, landing+0x8c) span has to sit inside a declared range. Testing only
+ * landing < hi lets the tail of the range's last 0x8c bytes be written past hi,
+ * which is how MM_MDSR's magic got overwritten when a block landed at
+ * 0x886FFFF0 -- the top of R12_17, exactly where MM_MDSR begins. */
 int a53_profile_landing_ok(const struct a53_profile *p, uint64_t landing) {
     if (!p) return 0;
     for (int i = 0; i < p->nranges; i++)
-        if (landing >= p->ranges[i].lo && landing < p->ranges[i].hi)
+        if (landing >= p->ranges[i].lo &&
+            landing <= p->ranges[i].hi - LANDING_SPILL)
             return 1;
     return 0;
 }
