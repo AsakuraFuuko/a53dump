@@ -131,6 +131,11 @@ struct builtin {
 #define R61_1 { 0x88701000ULL, 0x88770000ULL }
 #define R61_2 { 0x88781000ULL, 0x887E0000ULL }
 
+/* 13.60: layout identical to 12.00 except io_fixed_code grew by 0x2C24 bytes,
+ * shifting pmax from 0x885EA0E8 to 0x885ECD0C. All other segments unchanged.
+ * Values confirmed from live 13.60 MDSR boot log (pmax + LIMIT printk). */
+#define R13_17 { 0x885ECD0CULL, 0x88700000ULL }  /* io_fixed_code -> MM_MDSR (13.60) */
+
 static const struct builtin g_builtin[] = {
     { "12.00", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885EA0E8ULL, 0x88700000ULL, 23,
@@ -138,11 +143,17 @@ static const struct builtin g_builtin[] = {
         R12_07, R12_08, R12_09, R12_10, R12_11, R12_12,
         R12_13, R12_14, R12_15, R12_16, R12_17,
         R12_18, R12_19, R12_20, R12_21, R12_22 } },
-    /* 13.60: pmax and every gap below are confirmed against the console's own
-     * boot log. SIZE is NOT confirmed -- the layout table still says 0x171140,
-     * which on 12.00 stops one byte short of .shstrtab and needs 0x17E098 for a
-     * self-contained ELF. Do not assume it transfers: run `one` for the image
-     * and check e_shoff + e_shnum*e_shentsize before trusting a full read. */
+    /* 13.60: pmax and every gap below come from the console's own layout dump.
+     *
+     * Verified on hardware by the PR that added this row: `one` and `elfmeta`
+     * both succeed, so the 13.60 address-window validator (0x2951C) does not
+     * reject these reads.
+     *
+     * SIZE is the layout table's 0x171140 and is NOT independently confirmed.
+     * On 12.00 that value stops one byte short of .shstrtab, so a self-contained
+     * ELF needs 0x17E098. Do not assume it transfers: dump the image, then read
+     * e_shoff + e_shnum*e_shentsize out of the result and check the file covers
+     * the section header table. */
     { "13.60", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885ECD0CULL, 0x88700000ULL, 23,
       { R13_00, R13_01, R13_02, R13_03, R13_04, R13_05, R13_06,
