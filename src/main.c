@@ -134,10 +134,16 @@ static uint64_t dmap_from_kdata(void) {
     uint64_t data = (uint64_t)(uintptr_t)KERNEL_ADDRESS_DATA_BASE;
     uint64_t text = (uint64_t)(uintptr_t)KERNEL_ADDRESS_TEXT_BASE;
     if (!data || data <= text) data = text + 0x0D50000ULL;
-    uint64_t hi = kread64(data + 0x2e1cfb8ULL + 0x20);
-    uint64_t lo = kread64(data + 0x2e1cfb8ULL + 0x28);
-    if (hi == ~0ULL || lo == ~0ULL) return 0;
-    return hi - lo;
+    /* kernel_pmap_store offset varies by firmware version.
+     * Try each known offset; keep the first whose pml4/cr3 pair looks valid. */
+    static const uint64_t pmap_offsets[] = { 0x2E88FF8ULL, 0x2e1cfb8ULL };
+    for (unsigned i = 0; i < sizeof(pmap_offsets)/sizeof(pmap_offsets[0]); i++) {
+        uint64_t hi = kread64(data + pmap_offsets[i] + 0x20);
+        uint64_t lo = kread64(data + pmap_offsets[i] + 0x28);
+        if (hi != ~0ULL && lo != ~0ULL && hi > lo && (hi - lo) > 0xFFFF00000000ULL)
+            return hi - lo;
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ gates */

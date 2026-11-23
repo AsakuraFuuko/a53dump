@@ -86,12 +86,23 @@ struct builtin {
 #define R61_1 { 0x88701000ULL, 0x88770000ULL }
 #define R61_2 { 0x88781000ULL, 0x887E0000ULL }
 
+/* 13.60: layout identical to 12.00 except io_fixed_code grew by 0x2C24 bytes,
+ * shifting pmax from 0x885EA0E8 to 0x885ECD0C. All other segments unchanged.
+ * Values confirmed from live 13.60 MDSR boot log (pmax + LIMIT printk). */
+#define R13_17 { 0x885ECD0CULL, 0x88700000ULL }  /* io_fixed_code -> MM_MDSR (13.60) */
+
 static const struct builtin g_builtin[] = {
     { "12.00", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885EA0E8ULL, 0x88700000ULL, 23,
       { R12_00, R12_01, R12_02, R12_03, R12_04, R12_05, R12_06,
         R12_07, R12_08, R12_09, R12_10, R12_11, R12_12,
         R12_13, R12_14, R12_15, R12_16, R12_17,
+        R12_18, R12_19, R12_20, R12_21, R12_22 } },
+    { "13.60", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
+      0x885ECD0CULL, 0x88700000ULL, 23,
+      { R12_00, R12_01, R12_02, R12_03, R12_04, R12_05, R12_06,
+        R12_07, R12_08, R12_09, R12_10, R12_11, R12_12,
+        R12_13, R12_14, R12_15, R12_16, R13_17,
         R12_18, R12_19, R12_20, R12_21, R12_22 } },
     { "7.61",  0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885EA0E8ULL, 0x88700000ULL, 3, { R61_0, R61_1, R61_2 } },
