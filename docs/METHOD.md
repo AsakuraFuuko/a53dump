@@ -78,11 +78,12 @@ Only partially, and honestly so.
 
 | | status |
 |---|---|
-| command id, MDSR field offsets, wire format, transport discovery | identical across 4.02 … 7.61 … 12.00 |
+| command id, MDSR field offsets, wire format, transport discovery | identical across 4.02 … 7.61 … 12.00 … 13.60 |
 | EL3 VA of `ds`, EL3 VA of the image | **varies per build** |
 | 12.00 | verified end to end on hardware |
+| 13.60 | verified end to end on hardware (`0x2951C` validator does not reject image/elfmeta reads) |
 | 7.61 | static analysis only |
-| after 12.00 | **untested**; 13.60 adds an address-window validator (`0x2951C`) that 12.00 does not have |
+| after 13.60 | **untested** |
 
 ## 6. Two things it is not
 

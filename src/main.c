@@ -125,12 +125,42 @@ static uint32_t rd32(const uint8_t *p, size_t off) {
 }
 
 /* Direct-map offset for the host side of the A53 DRAM window. */
+extern const intptr_t KERNEL_ADDRESS_DMAP_BASE;
+
 static uint64_t dmap_from_kdata(void) {
+    if (KERNEL_ADDRESS_DMAP_BASE)
+        return (uint64_t)(uintptr_t)KERNEL_ADDRESS_DMAP_BASE;
+
+    uint64_t proc = (uint64_t)(uintptr_t)kernel_get_proc(0);
+    if (proc) {
+        uint64_t vmspace = kread64(proc + KERNEL_OFFSET_PROC_P_VMSPACE);
+        if (vmspace && vmspace != ~0ULL) {
+            uint64_t hi = kread64(vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP + 0x20);
+            uint64_t lo = kread64(vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP + 0x28);
+            if (hi != ~0ULL && lo != ~0ULL && hi > lo)
+                return hi - lo;
+        }
+    }
+
     uint64_t data = (uint64_t)(uintptr_t)KERNEL_ADDRESS_DATA_BASE;
     uint64_t text = (uint64_t)(uintptr_t)KERNEL_ADDRESS_TEXT_BASE;
-    if (!data || data <= text) data = text + 0x0D50000ULL;
-    uint64_t hi = kread64(data + 0x2e1cfb8ULL + 0x20);
-    uint64_t lo = kread64(data + 0x2e1cfb8ULL + 0x28);
+    uint64_t pmap_off = 0;
+    switch (kernel_get_fw_version() & 0xffff0000U) {
+    case 0x12000000U:
+    case 0x12020000U:
+        if (!data || data <= text) data = text + 0x0D50000ULL;
+        pmap_off = 0x2e1cfb8ULL;
+        break;
+    case 0x13600000U:
+        if (!data || data <= text) data = text + 0x0CC0000ULL;
+        pmap_off = 0x2e88ff8ULL;
+        break;
+    default:
+        return 0;
+    }
+
+    uint64_t hi = kread64(data + pmap_off + 0x20);
+    uint64_t lo = kread64(data + pmap_off + 0x28);
     if (hi == ~0ULL || lo == ~0ULL) return 0;
     return hi - lo;
 }

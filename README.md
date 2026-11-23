@@ -6,9 +6,10 @@ Dump the `a53.elf` image that runs on the PS5's A53 coprocessor, using a single
 SDBGP command that the host can steer without supplying an address.
 
 - **License:** GPL-3.0-or-later — required, not chosen. See [Credits](#credits).
-- **Verified on:** firmware 12.00 only.
-- **Live result:** 1,511,744 bytes, byte-identical across runs
-  (`sha256 4f3411746d0fd3826c80eefeb4eed1ecea2e632eca377ac015c0d6a6d062f241`).
+- **Verified on:** firmware 12.00 and 13.60.
+- **Live results:** 1,511,744 bytes on both builds:
+  - `12.00`: `sha256 4f3411746d0fd3826c80eefeb4eed1ecea2e632eca377ac015c0d6a6d062f241`
+  - `13.60`: `sha256 94cbeb0a72a2a41650fac8d3858261ce6f33e480e3c0e841d72fddd0ddff576f`
 
 ---
 
@@ -37,7 +38,7 @@ read_len  = last
 ```
 
 Everything else is version independent and was checked across the builds
-examined (4.02 … 7.61 … 12.00): the command id, the MDSR field offsets, the
+examined (4.02 … 7.61 … 12.00 … 13.60): the command id, the MDSR field offsets, the
 `deci5s_memory_arg` wire format, the response layout (`+0x60` text length,
 `+0x68` payload), and the transport discovery chain
 (`mp4sc + 0x18` → bushandle `+0x10` → `zcn_bar2`).
@@ -136,10 +137,9 @@ The payload reads its mode file once at startup, so a mode change needs a fresh
 4. Write `/data/a53dump.profile`, then run `base` → `probe` → `one`.
 5. Add a row to `g_builtin`.
 
-No release after 12.00 has been tested. The handler referenced by `0x01190201`
-lives at an EL3 VA that is not inside any dump we hold, so it cannot be
-confirmed statically; 13.60 additionally adds an address-window validator
-(`0x2951C`) that 12.00 does not have. The payload refuses rather than guesses.
+`13.60` is verified end-to-end (`one` and `elfmeta`): the address-window
+validator (`0x2951C`) does not reject `0x01190201` reads for the image or ELF
+metadata. Any other untested release still refuses rather than guesses.
 
 ## Files
 

@@ -39,6 +39,11 @@ struct builtin {
     struct a53_landing_range ranges[A53_MAX_LANDING_RANGES];
 };
 
+/* 13.60 landing-safe ranges, measured from EL3 boot log & live dump. */
+#define R136_0 { 0x88271140ULL, 0x88400000ULL } /* image end -> EL0 SYSHUB */
+#define R136_1 { 0x885ECD0CULL, 0x88700000ULL } /* seg pmax -> LIMIT        */
+#define R136_2 { 0x88701000ULL, 0x88770000ULL } /* core0 log ring           */
+#define R136_3 { 0x88781000ULL, 0x887E0000ULL } /* core1 log ring           */
 /* 12.00 landing-safe ranges, all measured (see A53_FIRMWARE_DUMP_HOWTO.md section 5). */
 #define R12_0 { 0x88271140ULL, 0x88400000ULL }  /* image end -> EL0 SYSHUB */
 #define R12_1 { 0x885EA0E8ULL, 0x88700000ULL }  /* seg pmax -> LIMIT        */
@@ -49,6 +54,8 @@ struct builtin {
 #define R61_2 { 0x88781000ULL, 0x887E0000ULL }
 
 static const struct builtin g_builtin[] = {
+    { "13.60", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
+      0x885ECD0CULL, 0x88700000ULL, 4, { R136_0, R136_1, R136_2, R136_3 } },
     { "12.00", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885EA0E8ULL, 0x88700000ULL, 4, { R12_0, R12_1, R12_2, R12_3 } },
     { "7.61",  0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
