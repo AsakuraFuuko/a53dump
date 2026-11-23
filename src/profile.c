@@ -82,14 +82,54 @@ struct builtin {
  * spill here is overwritten within seconds. */
 #define R12_21 { 0x88701000ULL, 0x88770000ULL }  /* core0 ring in MM_MDSR */
 #define R12_22 { 0x88781000ULL, 0x887F0000ULL }  /* core1 ring in IO_MDSR */
+/* 13.60 landing-safe ranges.
+ *
+ * Derived the same way as 12.00 -- read each segment end to end, land in the gap
+ * after it -- but the layout is not merely "12.00 with a longer io_fixed_code".
+ * Seven of the 31 G6 entries move (source: kernelkatio 13.60 capture,
+ * artifacts/external/2026-11-15_kernelkatio_1360/mm_mdsr.txt L223-260):
+ *
+ *   mli11 mm_ctrl_text      size  0x18F10 -> 0x188FC   (-0x614)
+ *   mli12 io_ctrl_text      size  0x46980 -> 0x46FA8   (+0x628)
+ *   mli13 ctrl_text         size  0x227EC -> 0x2286C   (+0x080)
+ *   mli01 mm_fixed_code     size  0x14C40 -> 0x16B14   (+0x1ED4)
+ *   mli02 mm_fixed_code_wac VA    0x88595000 -> 0x88597000  (+0x2000)
+ *   mli03 shared_fixed_code VA    0x885A8000 -> 0x885AA000  (+0x2000), size +0x74
+ *   mli04 io_fixed_code     VA    0x885B5000 -> 0x885B7000  (+0x2000), size +0xC24
+ *
+ * pmax 0x885EA0E8 -> 0x885ECD0C, LIMIT unchanged at 0x88700000.
+ *
+ * Using 12.00's gaps here does not corrupt anything -- gate 2 rejects the read --
+ * but mm_fixed_code, mm_fixed_code_wac and shared_fixed_code become unreachable,
+ * because their landings no longer fall in a gap. */
+#define R13_00 { 0x87FF0000ULL, 0x88000000ULL }  /* below the EL3 load segment */
+#define R13_01 { 0x8801EBA0ULL, 0x8801F000ULL }  /* EL3 load end -> loader data */
+#define R13_02 { 0x88021218ULL, 0x88022000ULL }  /* loader_el3_data -> dev_text */
+#define R13_03 { 0x8802359DULL, 0x88024000ULL }  /* dev_text -> EL2 */
+#define R13_04 { 0x88024D00ULL, 0x88025000ULL }  /* EL2 -> EL1/stacks/ptables */
+#define R13_05 { 0x88062000ULL, 0x88100000ULL }  /* stacks/ptables -> a53.elf */
+#define R13_06 { 0x88271140ULL, 0x88400000ULL }  /* a53.elf -> dev_text */
+#define R13_07 { 0x88401140ULL, 0x88410000ULL }  /* dev_text -> dev_data */
+/* No gap after dev_data this time: mli30's tail meets mli11's head exactly, so
+ * controller_dev_data needs mode=forced, as on 12.00. */
+#define R13_08 { 0x884388FCULL, 0x88440000ULL }  /* mm_ctrl_text -> io_ctrl_text */
+#define R13_09 { 0x88486FA8ULL, 0x88490000ULL }  /* io_ctrl_text -> ctrl_text */
+#define R13_10 { 0x884B286CULL, 0x884C0000ULL }  /* ctrl_text -> mm_data */
+#define R13_11 { 0x884C02A0ULL, 0x884D0000ULL }  /* mm_data -> io_data */
+#define R13_12 { 0x884D04A8ULL, 0x884E0000ULL }  /* io_data -> ctrl_data */
+#define R13_13 { 0x884E00D0ULL, 0x88580000ULL }  /* ctrl_data -> mm_fixed_code */
+#define R13_14 { 0x88596B14ULL, 0x88597000ULL }  /* mm_fixed_code -> wac */
+#define R13_15 { 0x885A9F58ULL, 0x885AA000ULL }  /* wac -> shared_fixed_code */
+#define R13_16 { 0x885B6258ULL, 0x885B7000ULL }  /* shared -> io_fixed_code */
+#define R13_17 { 0x885ECD0CULL, 0x88700000ULL }  /* io_fixed_code -> MM_MDSR */
+#define R13_18 { 0x88770000ULL, 0x88780000ULL }  /* MM_MDSR -> IO_MDSR */
+#define R13_19 { 0x887F1450ULL, 0x887FFC00ULL }  /* Layout -> driver param */
+#define R13_20 { 0x887FFE98ULL, 0x88800000ULL }  /* driver param -> window end */
+#define R13_21 { 0x88701000ULL, 0x88770000ULL }  /* core0 ring in MM_MDSR */
+#define R13_22 { 0x88781000ULL, 0x887F0000ULL }  /* core1 ring in IO_MDSR */
 #define R61_0 { 0x885EA0E8ULL, 0x88700000ULL }
 #define R61_1 { 0x88701000ULL, 0x88770000ULL }
 #define R61_2 { 0x88781000ULL, 0x887E0000ULL }
-
-/* 13.60: layout identical to 12.00 except io_fixed_code grew by 0x2C24 bytes,
- * shifting pmax from 0x885EA0E8 to 0x885ECD0C. All other segments unchanged.
- * Values confirmed from live 13.60 MDSR boot log (pmax + LIMIT printk). */
-#define R13_17 { 0x885ECD0CULL, 0x88700000ULL }  /* io_fixed_code -> MM_MDSR (13.60) */
 
 static const struct builtin g_builtin[] = {
     { "12.00", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
@@ -98,12 +138,17 @@ static const struct builtin g_builtin[] = {
         R12_07, R12_08, R12_09, R12_10, R12_11, R12_12,
         R12_13, R12_14, R12_15, R12_16, R12_17,
         R12_18, R12_19, R12_20, R12_21, R12_22 } },
+    /* 13.60: pmax and every gap below are confirmed against the console's own
+     * boot log. SIZE is NOT confirmed -- the layout table still says 0x171140,
+     * which on 12.00 stops one byte short of .shstrtab and needs 0x17E098 for a
+     * self-contained ELF. Do not assume it transfers: run `one` for the image
+     * and check e_shoff + e_shnum*e_shentsize before trusting a full read. */
     { "13.60", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885ECD0CULL, 0x88700000ULL, 23,
-      { R12_00, R12_01, R12_02, R12_03, R12_04, R12_05, R12_06,
-        R12_07, R12_08, R12_09, R12_10, R12_11, R12_12,
-        R12_13, R12_14, R12_15, R12_16, R13_17,
-        R12_18, R12_19, R12_20, R12_21, R12_22 } },
+      { R13_00, R13_01, R13_02, R13_03, R13_04, R13_05, R13_06,
+        R13_07, R13_08, R13_09, R13_10, R13_11, R13_12,
+        R13_13, R13_14, R13_15, R13_16, R13_17,
+        R13_18, R13_19, R13_20, R13_21, R13_22 } },
     { "7.61",  0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885EA0E8ULL, 0x88700000ULL, 3, { R61_0, R61_1, R61_2 } },
 };

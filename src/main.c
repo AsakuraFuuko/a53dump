@@ -129,21 +129,87 @@ static uint32_t rd32(const uint8_t *p, size_t off) {
            ((uint32_t)p[off + 2] << 16) | ((uint32_t)p[off + 3] << 24);
 }
 
-/* Direct-map offset for the host side of the A53 DRAM window. */
-static uint64_t dmap_from_kdata(void) {
+static int gate_mdsr(uint64_t dmap, const struct a53_profile *p);
+
+/* Direct-map offset for the host side of the A53 DRAM window.
+ *
+ * `kernel_pmap_store` sits at a different offset in `kernel_data` on each
+ * release, so more than one candidate is tried. A candidate is not accepted just
+ * because the pair looks plausible: the two fields it reads are adjacent enough
+ * that unrelated data can pass a range check, and a wrong direct map points the
+ * whole session at the wrong physical memory. Instead each candidate is used to
+ * look for the MDSR magic at p->ds_pa, which is what the session actually needs
+ * that offset for.
+ *
+ * Without a profile (scan mode) there is nothing to verify against, so the first
+ * candidate whose range check passes is returned and the caller re-checks. */
+static uint64_t dmap_at_offset(uint64_t data, uint64_t off) {
+    uint64_t hi = kread64(data + off + 0x20);
+    uint64_t lo = kread64(data + off + 0x28);
+    if (hi == ~0ULL || lo == ~0ULL) return 0;
+    if (hi <= lo) return 0;
+    uint64_t d = hi - lo;
+    /* A direct map lives in the upper canonical half; anything below that is
+     * some other field pair that happened to look ordered. */
+    if (d < 0xFFFF00000000ULL) return 0;
+    return d;
+}
+
+/* kernel_data has no usable symbol on every release, and when it does not, its
+ * base is a fixed distance past kernel_text. That distance is not constant:
+ * 13.60 sits 0x0CC0000 after text where 12.00 sits 0x0D50000. Both are tried. */
+static const uint64_t kdata_fallbacks[] = { 0x0D50000ULL, 0x0CC0000ULL };
+
+static uint64_t dmap_from_kdata(const struct a53_profile *p) {
     uint64_t data = (uint64_t)(uintptr_t)KERNEL_ADDRESS_DATA_BASE;
     uint64_t text = (uint64_t)(uintptr_t)KERNEL_ADDRESS_TEXT_BASE;
-    if (!data || data <= text) data = text + 0x0D50000ULL;
-    /* kernel_pmap_store offset varies by firmware version.
-     * Try each known offset; keep the first whose pml4/cr3 pair looks valid. */
-    static const uint64_t pmap_offsets[] = { 0x2E88FF8ULL, 0x2e1cfb8ULL };
-    for (unsigned i = 0; i < sizeof(pmap_offsets)/sizeof(pmap_offsets[0]); i++) {
-        uint64_t hi = kread64(data + pmap_offsets[i] + 0x20);
-        uint64_t lo = kread64(data + pmap_offsets[i] + 0x28);
-        if (hi != ~0ULL && lo != ~0ULL && hi > lo && (hi - lo) > 0xFFFF00000000ULL)
-            return hi - lo;
+
+    static const uint64_t offs[] = { 0x2E88FF8ULL, 0x2E1CFB8ULL };
+    uint64_t fallback_base = 0;
+    if (!data || data <= text) {
+        for (unsigned i = 0; i < sizeof(kdata_fallbacks)/sizeof(kdata_fallbacks[0]); i++) {
+            uint64_t cand = text + kdata_fallbacks[i];
+            if (p) {
+                /* Check every (base, offset) pair against the magic; a wrong
+                 * kernel_data base is indistinguishable from a wrong offset
+                 * except by whether it reaches the structure. */
+                for (unsigned j = 0; j < sizeof(offs)/sizeof(offs[0]); j++) {
+                    uint64_t d = dmap_at_offset(cand, offs[j]);
+                    if (d && gate_mdsr(d, p) == 0) {
+                        lg("dmap=%#llx via text+%#llx, pmap_store+%#llx (MDSR verified)",
+                           (unsigned long long)d,
+                           (unsigned long long)kdata_fallbacks[i],
+                           (unsigned long long)offs[j]);
+                        return d;
+                    }
+                }
+            }
+            if (!fallback_base) {
+                uint64_t d = dmap_at_offset(cand, offs[0]);
+                if (d) fallback_base = d;
+            }
+        }
+        data = text + kdata_fallbacks[0];
     }
-    return 0;
+
+    uint64_t first = 0;
+    for (unsigned i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
+        uint64_t d = dmap_at_offset(data, offs[i]);
+        if (!d) continue;
+        if (!first) first = d;
+        if (p && gate_mdsr(d, p) == 0) {
+            lg("dmap=%#llx via kernel_pmap_store+%#llx (MDSR verified)",
+               (unsigned long long)d, (unsigned long long)offs[i]);
+            return d;
+        }
+        lg("dmap candidate %#llx at +%#llx did not reach MDSR",
+           (unsigned long long)d, (unsigned long long)offs[i]);
+    }
+    if (p) {
+        lg("FATAL: no kernel_data base and pmap_store offset reaches the MDSR magic");
+        return 0;
+    }
+    return first ? first : fallback_base;
 }
 
 /* ------------------------------------------------------------------ gates */
@@ -1079,14 +1145,10 @@ int main(void) {
     if (strcmp(mode, "version") == 0) return mode_version();
     /* scan needs no profile: it discovers one. */
     if (strcmp(mode, "scan") == 0) {
-        uint64_t dm = dmap_from_kdata();
+        uint64_t dm = dmap_from_kdata(NULL);
         if (!dm) { lg("FATAL: cannot locate direct map"); return 1; }
         return mode_scan(dm, NULL);
     }
-
-    uint64_t dmap = dmap_from_kdata();
-    lg("dmap=%#llx", (unsigned long long)dmap);
-    if (!dmap) { lg("FATAL: cannot locate direct map"); return 1; }
 
     /* Resolve the release from the console itself, not from a host guess.
      * `GET_CONF` is a plain read command; failures here are not fatal for
@@ -1117,6 +1179,12 @@ int main(void) {
         return 2;
     }
     a53_profile_print(&p, lg);
+
+    /* The direct map is resolved with the profile in hand so each candidate
+     * offset can be checked against the MDSR magic before it is trusted. */
+    uint64_t dmap = dmap_from_kdata(&p);
+    lg("dmap=%#llx", (unsigned long long)dmap);
+    if (!dmap) { lg("FATAL: cannot locate direct map"); return 1; }
 
     /* Gate 1 runs for every mode, including base: it is the cheapest way to
      * prove the profile matches the hardware. */
