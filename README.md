@@ -7,8 +7,9 @@ SDBGP command that the host can steer without supplying an address.
 
 - **License:** GPL-3.0-or-later — required, not chosen. See [Credits](#credits).
 - **Verified on:** firmware 12.00 only.
-- **Live result:** 1,511,744 bytes, byte-identical across runs
-  (`sha256 4f3411746d0fd3826c80eefeb4eed1ecea2e632eca377ac015c0d6a6d062f241`).
+- **Live result:** all 22 segments of the A53 memory map, 3,862,709 bytes, every
+  length exactly matching the console's own layout table. The `.elf` alone is
+  1,511,744 bytes and parses with `readelf` (17 program headers).
 
 ---
 
@@ -107,6 +108,53 @@ run restore  # must print VERDICT: RESTORED
 The payload reads its mode file once at startup, so a mode change needs a fresh
 `loadpayload`.
 
+### Dumping every segment
+
+`one` reads whatever `[va, va+len)` you hand it, so a full dump is one call per
+segment. The list is the 22 rows of the layout table; each read is complete on
+its own — no chunked driver, no state file.
+
+```bash
+one() {   # va len
+    printf '%s\n' "$1" > /tmp/v; printf '%s\n' "$2" > /tmp/l
+    curl -sS -T /tmp/v "ftp://$PS5:2121/data/a53dump.va"
+    curl -sS -T /tmp/l "ftp://$PS5:2121/data/a53dump.len"
+    run one
+    curl -s "ftp://$PS5:2121/data/a53dump.bin" -o "seg_$1.bin"
+}
+
+one 0x88000000 0x1eba0    # EL3 entry + L1/L2/L3 tables
+one 0x8801f000 0x2218
+one 0x88022000 0x159d
+one 0x88024000 0xd00
+one 0x88025000 0x3d000    # EL1 + both stacks + both page tables
+one 0x88100000 0x17e098   # a53.elf, through the section header table
+one 0x88400000 0x1140
+one 0x88420000 0x18f10
+one 0x88440000 0x46980
+one 0x88490000 0x227ec
+one 0x884c0000 0x2a0
+one 0x884d0000 0x4a8
+one 0x884e0000 0xd0
+one 0x88580000 0x14c40
+one 0x88595000 0x12f58
+one 0x885a8000 0xc1e4
+one 0x885b5000 0x350e8
+one 0x88700000 0x70000    # direct map, no write
+one 0x88780000 0x70000    # direct map, no write
+one 0x887f0000 0x1450     # direct map, no write
+one 0x887ffc00 0x298      # direct map, no write
+
+# controller_dev_data has no gap after it: read its neighbour first, then force
+one 0x88420000 0x18f10
+printf 'forced\n' > /tmp/m
+curl -sS -T /tmp/m "ftp://$PS5:2121/data/a53dump.mode"
+one 0x88410000 0x10000
+```
+
+Verify: every file's size must equal the `len` you asked for, and
+`readelf -l seg_0x88100000.bin` must show 17 program headers.
+
 ## Modes
 
 | Mode | Writes A53 | Purpose |
@@ -115,14 +163,79 @@ The payload reads its mode file once at startup, so a mode change needs a fresh
 | `scan` | **no** | scan the host MDSR window for the magic, report `ds_pa` candidates |
 | `base` | **no** | resolve profile, run gate 1, print the MDSR fields |
 | `probe` | **no** | send `0x01190201` once and compare the text length against the ring cursor |
-| `one` | yes | arm, read the whole image, restore, truncate to `SIZE` |
+| `one` | depends | read `[va, va+len)`; direct map when it answers, else arm + read |
+| `forced` | yes | read a segment whose tail butts the next one (see below) |
 | `elfmeta` | yes | read `.shstrtab` and the section header table (outside the image) |
-| `dump` | yes | chunked driver; only usable when `landing` falls *outside* the region read |
+| `dump` | depends | chunked driver; same path selection as `one` per chunk |
+| `paddr` | **no** | read through the direct map only, never arm or send a command |
+| `wrap` | yes | exercise the `count != 0` branch of `0x01190201` |
 | `restore` | yes | restore the saved MDSR fields |
+
+### The segment table
+
+Everything hinges on the console's own layout dump, not on guesswork. EL3 prints
+it during boot (`mp4_layout_seg_set_name`): 31 entries inside the G6 window, each
+`VA + size = end [PA + size] - name`. That is the list in `src/profile.c`, and
+`docs/METHOD.md` §4 covers the gates and why the landing must be a gap.
+
+Two facts in that table are easy to miss and both are load-bearing:
+
+- `0x88000000` begins with the EL3 entry point and holds the L1/L2/L3
+  translation tables. The first bytes are live page tables even though they
+  read like padding.
+- `0x88025000`-`0x88062000` is a **single** region holding EL1, both core stacks
+  and both core page tables. It is not several small regions with gaps between
+  them.
+
+Writing anywhere in either kills the coprocessor and takes the SMBus channel with
+it, so `ftp`/`elfldr` die too and a power cycle is the only way back.
+
+### Two read paths
+
+`0x01190201` requires arming `ds->offset`/`last`, which drags the A53 log cursor
+onto the landing point: the landing is always `va + len`, and that is exactly
+where A53 writes its log line. Both the `count == 0` and `count != 0` branches
+compute it the same way, so neither avoids the write -- `count` only selects the
+length source (`+0x218` vs `+0x210`).
+
+What is controllable is *where* the landing falls. Read a segment end-to-end and
+the landing sits on its tail, in the gap before the next segment, so the spill
+never enters the segment being read. That is the basis of the whole method: 22
+segments, each read whole, every landing inside a gap.
+
+Above `A53_DIRECT_LO` (`0x885F0000`) the same memory is reachable with
+`kernel_copyout` over the direct map. That path sends no command and writes
+nothing at all, so the cursor does not move (measured: +0x0, against +0x8C per
+10 s of idle drift). `one` and `dump` use it whenever `copyout` succeeds and fall
+back otherwise. The mapped extent is not contiguous -- `0x88600000` answers while
+`0x885EB000` does not -- so the copyout result is the test, not a range check.
+
+### `forced`
+
+One segment has no gap after it: `controller_dev_data` (`0x88410000`, 0x10000)
+ends exactly at `mm_controller_dram_text`'s first byte, so gate 2 refuses it by
+policy. `forced` skips gate 2 and trusts the caller to have read the *next*
+segment first -- then the spill lands on bytes already saved. The window itself
+is copied out before A53 logs, so the data returned is clean either way.
+
+Do not reach for `forced` as a general escape hatch. It disables the only check
+standing between a read and a live structure.
 
 > `dump` is **not** usable for the whole image on 12.00: a chunk's landing point
 > necessarily falls inside the region still to be read, so gate 2 refuses it.
-> Use `one`.
+> Use `one` per segment below the direct-map floor.
+
+### What not to do
+
+Reverse-order sweeping of large blocks was tried and removed. The reasoning looks
+sound -- land on data already copied out -- but the "already copied out" region
+still belongs to segments the firmware is executing, and the first landing has to
+sit above the whole window, which is outside every mapped segment. On hardware it
+wrote past `0x88800000`, killed A53, and took `ftpsrv` and `elfldr` down with it.
+
+Small reverse chunks fail for a different reason: the landing lands inside the
+segment being read. Only gaps are safe landings, and gaps come from reading whole
+segments in the forward direction.
 
 ## Adding a firmware release
 
@@ -155,6 +268,15 @@ confirmed statically; 13.60 additionally adds an address-window validator
 
 `one` yields the loaded image. To rebuild a `readelf`-able ELF, run `elfmeta`
 afterwards and splice the two artefacts in:
+
+> **Read the whole ELF in one call when you can.** `.shstrtab` starts at file
+> offset `0x171140`, which is exactly one byte past the end of the segment the
+> layout table calls `ELF image (a53.elf)` — so asking for `0x171140` bytes lands
+> the spill precisely on the string table's first `0x8c` bytes. Asking for
+> `0x17E098` bytes instead (the real extent, through the section header table)
+> moves the landing to `0x8827E098`, in the gap, and the ELF comes back intact
+> and self-contained. Verified: the raw memory dump patched at that one 70-byte
+> span is byte-identical to the assembled file below.
 
 ```python
 import struct

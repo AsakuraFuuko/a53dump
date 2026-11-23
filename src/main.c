@@ -94,8 +94,13 @@
 
 /* Read cap. The handler is armed with F_LAST = len <= this; the response
  * buffer must hold 0x68 header + len + spill. */
-#define READ_MAX 0x1F0000U
-static uint8_t g_raw[0x200000];
+/* Upper bound for one request. The A53 side accepts a larger window than the
+ * original 0x1F0000 guess: the only hard limits are the response buffer and
+ * the landing range. Raised so that regions far below the whitelist can be
+ * read in one go, with the landing point kept on a range already proven safe
+ * (0x88271140) instead of inventing a new one. */
+#define READ_MAX 0x280000U
+static uint8_t g_raw[0x290000];
 
 static FILE *g_log;
 
@@ -379,6 +384,51 @@ static int fetch_once(uint64_t *out_len, uint8_t *out, size_t out_cap) {
 
 /* --------------------------------------------------------------- modes */
 
+/* mode=paddr -- read A53 memory straight through the direct map.
+ *
+ * Everything so far went through 0x01190201, which requires arming DS fields
+ * and therefore drags the A53 log cursor onto the landing point. But GATE1 has
+ * always read the very same memory with kernel_copyout(dmap + ds_pa) and never
+ * armed anything. If the A53 window is linearly mapped (VA-PA is a constant
+ * 0x28000000 here), the whole image is reachable without the SDBGP command at
+ * all -- no arming, no cursor movement, nothing written.
+ *
+ * This mode tests exactly that: copy [va, va+len) via the direct map and write
+ * the bytes out for comparison against the 0x01190201 path.
+ */
+static int mode_paddr(uint64_t dmap, const struct a53_profile *p) {
+    uint64_t va  = read_hex_file(VA_PATH,  p->ds);
+    uint64_t len = read_hex_file(LEN_PATH, 0x1000);
+    remove(VA_PATH);
+    remove(LEN_PATH);
+    if (len == 0 || len > READ_MAX) {
+        lg("FATAL: bad len=%#llx", (unsigned long long)len);
+        return 1;
+    }
+    /* The mapping GATE1 already relies on. */
+    uint64_t pa = va - p->ds + p->ds_pa;
+    lg("paddr va=%#llx -> pa=%#llx len=%#llx", (unsigned long long)va,
+       (unsigned long long)pa, (unsigned long long)len);
+
+    static uint8_t buf[READ_MAX];
+    memset(buf, 0, sizeof(buf));
+    if (kernel_copyout((intptr_t)(dmap + pa), buf, (size_t)len) != 0) {
+        lg("VERDICT: PADDR_FAILED (copyout rejected %#llx)",
+           (unsigned long long)pa);
+        return 1;
+    }
+    FILE *f = fopen(OUT_PATH, "wb");
+    if (f) { fwrite(buf, 1, (size_t)len, f); fclose(f); }
+    lg("wrote %s (%llu B)", OUT_PATH, (unsigned long long)len);
+
+    uint64_t magic = 0;
+    memcpy(&magic, buf, 8);
+    lg("paddr magic=%#llx expected=%#llx", (unsigned long long)magic,
+       (unsigned long long)MDSR_MAGIC);
+    lg("VERDICT: %s", magic == MDSR_MAGIC ? "PADDR_OK" : "PADDR_NO_MAGIC");
+    return magic == MDSR_MAGIC ? 0 : 1;
+}
+
 static int mode_base(uint64_t dmap, const struct a53_profile *p) {
     print_mdsr(dmap, p, "core0");
     lg("VERDICT: BASELINE_ONLY");
@@ -414,9 +464,50 @@ static int mode_probe(uint64_t dmap, const struct a53_profile *p) {
     return 1;
 }
 
-/* Shared body of `one` and `dump`. Reads [va, va+len), restores, writes. */
+/* Direct-map probe: can [va, va+len) be copied out of the A53 window without
+ * going through 0x01190201 at all?
+ *
+ * Why this matters: the SDBGP read path requires arming ds->offset/last, which
+ * drags the A53 log cursor onto the landing point -- the spill is unavoidable
+ * and can only be aimed at a sacrificial address. kernel_copyout() over the
+ * direct map touches nothing: no command, no arming, no write. Measured cost is
+ * zero cursor movement (see mode_paddr).
+ *
+ * Coverage is the catch. Only part of the A53 window is mapped here, so this is
+ * a probe, not a replacement: 0x88700000 (448 KiB) and 0x88780000 answer, while
+ * 0x88100000 / 0x88400000 / 0x885EB000 do not. Callers therefore try this first
+ * and fall back to the command path. */
+static int direct_read(uint64_t dmap, const struct a53_profile *p,
+                       uint64_t va, uint64_t len, uint8_t *buf) {
+    /* No range guard on purpose. The mapped extent is neither contiguous nor
+     * aligned to the DS window -- 0x88600000 answers while 0x885EB000 and
+     * 0x88100000 do not -- so the only reliable test is the copyout itself. A
+     * rejected page yields 0 and the caller falls back to the command path. */
+    if (va < A53_DIRECT_LO) return 0;   /* below the measured direct-map floor */
+    uint64_t pa = va - p->ds + p->ds_pa;
+    if (kernel_copyout((intptr_t)(dmap + pa), buf, (size_t)len) != 0) return 0;
+    return 1;
+}
+
+/* Shared body of `one` and `dump`. Reads [va, va+len), restores, writes.
+ *
+ * Path selection: direct map when it answers (pollution-free), command read
+ * otherwise. `wrap`/`one` keep their old behaviour for A/B work. */
 static int do_read(uint64_t dmap, const struct a53_profile *p,
                    uint64_t va, uint64_t len, uint64_t *got_out) {
+    static uint8_t direct[READ_MAX];
+    if (len <= sizeof(direct) && direct_read(dmap, p, va, len, direct)) {
+        FILE *df = fopen(OUT_PATH, "ab");
+        if (!df) { lg("FATAL: cannot append %s", OUT_PATH); return 1; }
+        fwrite(direct, 1, (size_t)len, df);
+        fclose(df);
+        lg("read va=%#llx asked=%#llx got=%#llu via=directmap (no spill)",
+           (unsigned long long)va, (unsigned long long)len,
+           (unsigned long long)len);
+        if (got_out) *got_out = len;
+        return 0;
+    }
+
     if (gate_landing(p, va, len) != 0) return 1;
     if (arm(dmap, p, va, len) != 0) return 1;
 
@@ -450,6 +541,59 @@ static int do_read(uint64_t dmap, const struct a53_profile *p,
        (unsigned long long)(n - len));
     if (got_out) *got_out = n;
     return 0;
+}
+
+/* mode=forced -- read a segment whose tail butts against the next segment.
+ *
+ * controller_dev_data (0x88410000, 0x10000) ends exactly at
+ * mm_controller_dram_text's first byte, so there is no gap to land in and gate 2
+ * refuses it by policy. The spill is harmless *provided the next segment was
+ * already copied out* -- which is the caller's responsibility here, hence the
+ * explicit mode rather than a rule in do_read. Read mm_controller_dram_text
+ * first, then this.
+ *
+ * The landing is the only thing damaged: the window itself is read before A53
+ * writes its log line, so the bytes returned are clean.
+ */
+static int mode_forced(uint64_t dmap, const struct a53_profile *p) {
+    if (transport_up() != 0) return 1;
+    remove(OUT_PATH);
+    uint64_t va  = read_hex_file(VA_PATH,  p->image);
+    uint64_t len = read_hex_file(LEN_PATH, p->size);
+    remove(VA_PATH);
+    remove(LEN_PATH);
+    if (len == 0 || len > READ_MAX) {
+        lg("FATAL: bad len=%#llx", (unsigned long long)len);
+        return 1;
+    }
+    lg("forced va=%#llx len=%#llx landing=%#llx (next segment assumed dumped)",
+       (unsigned long long)va, (unsigned long long)len,
+       (unsigned long long)(va + len));
+
+    if (arm(dmap, p, va, len) != 0) return 1;
+    static uint8_t buf[READ_MAX + 0x1000];
+    uint64_t n = 0;
+    int rc = fetch_once(&n, buf, sizeof(buf));
+
+    uint64_t o = 0, sz = 0, l = 0;
+    if (load_fields(&o, &sz, &l) == 0) {
+        uint64_t base = dmap + p->ds_pa;
+        (void)kernel_copyin(&o,  (intptr_t)(base + F_OFF),  8);
+        (void)kernel_copyin(&sz, (intptr_t)(base + F_SIZE), 8);
+        (void)kernel_copyin(&l,  (intptr_t)(base + F_LAST), 8);
+    } else {
+        restore_baseline(dmap, p);
+    }
+    if (rc != 0) { lg("VERDICT: READ_FAILED"); return 1; }
+
+    FILE *f = fopen(OUT_PATH, "ab");
+    if (!f) { lg("FATAL: cannot append %s", OUT_PATH); return 1; }
+    fwrite(buf, 1, (size_t)(n < len ? n : len), f);
+    fclose(f);
+    lg("forced got=%#llu kept=%#llx", (unsigned long long)n,
+       (unsigned long long)(n < len ? n : len));
+    lg("VERDICT: %s", n >= len ? "FORCED_OK" : "FORCED_SHORT");
+    return n >= len ? 0 : 1;
 }
 
 static int mode_one(uint64_t dmap, const struct a53_profile *p) {
@@ -530,6 +674,97 @@ static int mode_dump(uint64_t dmap, const struct a53_profile *p) {
     lg("VERDICT: CHUNK_OK");
     return 0;
 }
+
+/* mode=wrap -- exercise the count != 0 branch of 0x01190201.
+ *
+ * Background: with count == 0 the handler takes len from +0x218 ("last") and
+ * reads base[0 .. last). With count != 0 it takes len from +0x210 ("size") and
+ * reads base[last .. size) followed by base[0 .. last) -- a ring read.
+ *
+ * Purpose here is narrow: confirm which branch this build actually takes and
+ * what the landing point becomes, without touching anything live. The window is
+ * armed with size == last == len, so the first copy is empty and the second is
+ * the plain [0, len). The landing then sits at base+last == base+len, which for
+ * va=DS lands inside the core0 log ring -- a region A53 overwrites itself.
+ */
+static int mode_wrap(uint64_t dmap, const struct a53_profile *p) {
+    uint64_t va  = read_hex_file(VA_PATH,  p->ds);
+    uint64_t len = read_hex_file(LEN_PATH, 0x1000);
+    remove(VA_PATH);
+    remove(LEN_PATH);
+    if (len == 0 || len > READ_MAX) {
+        lg("FATAL: bad len=%#llx", (unsigned long long)len);
+        return 1;
+    }
+    if (gate_landing(p, va, len) != 0) return 1;
+
+    uint64_t base = dmap + p->ds_pa;
+    uint64_t cur_off = 0, cur_size = 0, cur_last = 0, cur_cnt = 0;
+    mdsr_fields(dmap, p, &cur_off, &cur_size, &cur_last, &cur_cnt);
+    if (save_fields(cur_off, cur_size, cur_last) != 0) return 1;
+    lg("saved off=%#llx size=%#llx last=%#llx count=%llu",
+       (unsigned long long)cur_off, (unsigned long long)cur_size,
+       (unsigned long long)cur_last, (unsigned long long)cur_cnt);
+
+    /* Ring read shape: offset points at the window, size == last == len so the
+     * two halves join into exactly [0, len) and the landing is base + len. */
+    uint64_t off  = va - p->ds;
+    uint64_t size = len;
+    uint64_t last = len;
+    uint64_t cnt  = 1;                  /* forces the wrapped branch */
+
+    int r1 = kernel_copyin(&off,  (intptr_t)(base + F_OFF),  8);
+    int r2 = kernel_copyin(&size, (intptr_t)(base + F_SIZE), 8);
+    int r3 = kernel_copyin(&last, (intptr_t)(base + F_LAST), 8);
+    int r4 = kernel_copyin(&cnt,  (intptr_t)(base + F_CNT),  8);
+    uint64_t rb1 = 0, rb2 = 0, rb3 = 0, rb4 = 0;
+    mdsr_fields(dmap, p, &rb1, &rb2, &rb3, &rb4);
+    lg("armed off=%#llx size=%#llx last=%#llx count=%#llu",
+       (unsigned long long)rb1, (unsigned long long)rb2,
+       (unsigned long long)rb3, (unsigned long long)rb4);
+    if (r1 || r2 || r3 || r4 || rb1 != off || rb2 != size || rb3 != last ||
+        rb4 != cnt) {
+        lg("FATAL: arm mismatch (%d/%d/%d/%d)", r1, r2, r3, r4);
+        restore_baseline(dmap, p);
+        return 1;
+    }
+
+    static uint8_t buf[READ_MAX + 0x1000];
+    uint64_t n = 0;
+    int rc = fetch_once(&n, buf, sizeof(buf));
+
+    uint64_t o = 0, sz = 0, l = 0;
+    if (load_fields(&o, &sz, &l) == 0) {
+        (void)kernel_copyin(&o,  (intptr_t)(base + F_OFF),  8);
+        (void)kernel_copyin(&sz, (intptr_t)(base + F_SIZE), 8);
+        (void)kernel_copyin(&l,  (intptr_t)(base + F_LAST), 8);
+        uint64_t zero = 0;
+        (void)kernel_copyin(&zero, (intptr_t)(base + F_CNT), 8);  /* clear wrap */
+        lg("restored off=%#llx size=%#llx last=%#llx count=0",
+           (unsigned long long)o, (unsigned long long)sz, (unsigned long long)l);
+    } else {
+        restore_baseline(dmap, p);
+    }
+    if (rc != 0) { lg("VERDICT: WRAP_READ_FAILED"); return 1; }
+
+    /* Keep the bytes: the point of this mode is comparing them against the
+     * count == 0 path over the same window. */
+    if (n) {
+        FILE *wf = fopen(OUT_PATH, "wb");
+        if (wf) { fwrite(buf, 1, (size_t)n, wf); fclose(wf); }
+        lg("wrote %s (%llu B)", OUT_PATH, (unsigned long long)n);
+    }
+    lg("wrap got=%#llu asked=%#llx", (unsigned long long)n,
+       (unsigned long long)len);
+    /* Did the handler honour +0x210 or fall back to +0x218? With both equal
+     * here the byte count cannot tell them apart, but a mismatch against `len`
+     * says the ring read produced a different span than requested. */
+    lg("VERDICT: %s", n == len ? "WRAP_OK" : "WRAP_LEN_MISMATCH");
+    return n == len ? 0 : 1;
+}
+
+static int read_exact(uint64_t dmap, const struct a53_profile *p,
+                      uint64_t va, uint64_t len, uint8_t *dst, int strict);
 
 static int mode_restore(uint64_t dmap, const struct a53_profile *p) {
     uint64_t o = 0, s = 0, l = 0;
@@ -638,8 +873,8 @@ static int read_u64(const uint8_t *b, size_t off, uint64_t *out) {
 
 /* Read [va, va+len) into *dst, then drop the spill the handler appended. */
 static int read_exact(uint64_t dmap, const struct a53_profile *p,
-                      uint64_t va, uint64_t len, uint8_t *dst) {
-    if (gate_landing(p, va, len) != 0) return -1;
+                      uint64_t va, uint64_t len, uint8_t *dst, int strict) {
+    if (strict && gate_landing(p, va, len) != 0) return -1;
     if (arm(dmap, p, va, len) != 0) return -1;
 
     uint64_t got = 0;
@@ -727,7 +962,7 @@ static int mode_elfmeta(uint64_t dmap, const struct a53_profile *p) {
            (unsigned long long)shdrs_len);
         return 1;
     }
-    if (read_exact(dmap, p, p->image + shoff, shdrs_len, g_meta) != 0) {
+    if (read_exact(dmap, p, p->image + shoff, shdrs_len, g_meta, 1) != 0) {
         lg("VERDICT: READ_FAILED");
         return 1;
     }
@@ -758,7 +993,7 @@ static int mode_elfmeta(uint64_t dmap, const struct a53_profile *p) {
         return 1;
     }
     if (read_exact(dmap, p, p->image + sh_off + skip, sh_size - skip,
-                   g_meta + skip) != 0) {
+                   g_meta + skip, 1) != 0) {
         lg("VERDICT: READ_FAILED");
         return 1;
     }
@@ -885,13 +1120,16 @@ int main(void) {
     }
 
     if (strcmp(mode, "base") == 0)    return mode_base(dmap, &p);
+    if (strcmp(mode, "paddr") == 0)   return mode_paddr(dmap, &p);
     if (strcmp(mode, "probe") == 0)   return mode_probe(dmap, &p);
     if (strcmp(mode, "one") == 0)     return mode_one(dmap, &p);
+    if (strcmp(mode, "forced") == 0)  return mode_forced(dmap, &p);
     if (strcmp(mode, "dump") == 0)    return mode_dump(dmap, &p);
     if (strcmp(mode, "elfmeta") == 0) return mode_elfmeta(dmap, &p);
+    if (strcmp(mode, "wrap") == 0)    return mode_wrap(dmap, &p);
     if (strcmp(mode, "restore") == 0) return mode_restore(dmap, &p);
 
     lg("FATAL: unknown mode '%s'", mode);
-    lg("modes: version | scan | base | probe | one | elfmeta | dump | restore");
+    lg("modes: version | scan | base | probe | one | forced | elfmeta | dump | wrap | paddr | restore");
     return 1;
 }

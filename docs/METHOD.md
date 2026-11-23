@@ -72,6 +72,40 @@ three gates before trusting anything:
 Unknown firmware never reaches the write path — the profile lookup fails and the process
 exits with code 2 before touching A53.
 
+### Where the landing may go
+
+Gate 2 is only as good as its range list, and the range list is only as good as the
+segment table behind it. Get the segments wrong and the gate happily approves a write
+into a live page table.
+
+The table comes from the console itself. EL3 prints it at boot via
+`mp4_layout_seg_set_name` — 31 entries in the G6 window, each `VA + size = end
+[PA + size] - name`. Deduplicated that is 22 segments, and the safe landings are the
+gaps between them.
+
+Reading a segment **end to end** puts the landing on its tail, which is the gap before
+the next segment. That is the whole trick: the spill never enters the region being read,
+so 22 whole-segment reads cover everything without damaging anything.
+
+Two regions break naive reasoning about "empty space":
+
+- `0x88000000` starts with the EL3 entry point and carries the L1/L2/L3 translation
+  tables — live page tables, not padding.
+- `0x88025000`–`0x88062000` is **one** segment holding EL1, both core stacks and both
+  core page tables. Between them there are no gaps to land in.
+
+Damaging either kills the coprocessor and takes the SMBus channel with it, so `ftpsrv`
+and `elfldr` die as well and only a power cycle recovers the console. A reverse-order
+sweep in large blocks did exactly this: its first landing had to sit above the whole
+window (`0x88800000`), outside every mapped segment, and the write went off the end.
+
+### One segment has no gap
+
+`controller_dev_data` (`0x88410000`, `0x10000`) ends exactly at
+`mm_controller_dram_text`'s first byte. `mode=forced` skips gate 2 for it, on the
+caller's promise that the next segment was read first — then the spill lands on bytes
+already saved. It is not an escape hatch for anything else.
+
 ## 5. On "is this generic?"
 
 Only partially, and honestly so.

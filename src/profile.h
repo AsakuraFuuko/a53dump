@@ -46,7 +46,14 @@ struct a53_landing_range {
     uint64_t hi;
 };
 
-#define A53_MAX_LANDING_RANGES 6
+#define A53_MAX_LANDING_RANGES 28
+
+/* Lowest VA the direct map reaches. Measured: 0x885EB000 is rejected by
+ * kernel_copyout while 0x885F0000 answers, so the boundary sits in between and
+ * this is the safe floor. Everything at or above it can be read without the
+ * SDBGP command -- no arming, no spill. The value is stored rounded up to the
+ * last known-good page. */
+#define A53_DIRECT_LO 0x885F0000ULL
 
 struct a53_profile {
     char     release[24];   /* "12.00", as parsed from the GET_CONF banner */

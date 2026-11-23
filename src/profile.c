@@ -39,18 +39,60 @@ struct builtin {
     struct a53_landing_range ranges[A53_MAX_LANDING_RANGES];
 };
 
-/* 12.00 landing-safe ranges, all measured (see A53_FIRMWARE_DUMP_HOWTO.md section 5). */
-#define R12_0 { 0x88271140ULL, 0x88400000ULL }  /* image end -> EL0 SYSHUB */
-#define R12_1 { 0x885EA0E8ULL, 0x88700000ULL }  /* seg pmax -> LIMIT        */
-#define R12_2 { 0x88701000ULL, 0x88770000ULL }  /* core0 log ring           */
-#define R12_3 { 0x88781000ULL, 0x887E0000ULL }  /* core1 log ring           */
+/* 12.00 landing-safe ranges.
+ *
+ * Source of truth: the console's own layout dump,
+ *   mp4_layout_seg_set_name   (el3_boot log, 31 G6 entries)
+ * which prints VA + size + name for every region. Deduplicated (EL2 and the
+ * ELF load of EL2 overlap, as do EL1/stack/page tables) that is 22 segments.
+ *
+ * A landing L is safe iff the spill [L, L+0x8c) intersects no segment. Reading
+ * a segment end-to-end puts the landing on its tail, so every gap below is the
+ * space between one segment's end and the next segment's start.
+ *
+ * Two entries are easy to get wrong and were, during testing:
+ *   - 0x88025000-0x88062000 is ONE segment holding EL1, both core stacks and
+ *     both core page tables. It is not a series of small regions with gaps.
+ *   - 0x88000000 holds the EL3 entry and the L1/L2/L3 translation tables, so
+ *     its first bytes are live page tables even though they look like padding.
+ * Writing into either kills the coprocessor; that is what A53 dying during the
+ * whole-window sweep came from. */
+#define R12_00 { 0x87FF0000ULL, 0x88000000ULL }  /* below the EL3 load segment */
+#define R12_01 { 0x8801EBA0ULL, 0x8801F000ULL }  /* EL3 load end -> loader data */
+#define R12_02 { 0x88021218ULL, 0x88022000ULL }  /* loader_el3_data -> dev_text */
+#define R12_03 { 0x8802359DULL, 0x88024000ULL }  /* dev_text -> EL2 */
+#define R12_04 { 0x88024D00ULL, 0x88025000ULL }  /* EL2 -> EL1/stacks/ptables */
+#define R12_05 { 0x88062000ULL, 0x88100000ULL }  /* stacks/ptables -> a53.elf */
+#define R12_06 { 0x88271140ULL, 0x88400000ULL }  /* a53.elf -> dev_text */
+#define R12_07 { 0x88401140ULL, 0x88410000ULL }  /* dev_text -> dev_data */
+#define R12_08 { 0x88438F10ULL, 0x88440000ULL }  /* mm_ctrl_text -> io_ctrl_text */
+#define R12_09 { 0x88486980ULL, 0x88490000ULL }  /* io_ctrl_text -> ctrl_text */
+#define R12_10 { 0x884B27ECULL, 0x884C0000ULL }  /* ctrl_text -> mm_data */
+#define R12_11 { 0x884C02A0ULL, 0x884D0000ULL }  /* mm_data -> io_data */
+#define R12_12 { 0x884D04A8ULL, 0x884E0000ULL }  /* io_data -> ctrl_data */
+#define R12_13 { 0x884E00D0ULL, 0x88580000ULL }  /* ctrl_data -> mm_fixed_code */
+#define R12_14 { 0x88594C40ULL, 0x88595000ULL }  /* mm_fixed_code -> wac */
+#define R12_15 { 0x885A7F58ULL, 0x885A8000ULL }  /* wac -> shared_fixed_code */
+#define R12_16 { 0x885B41E4ULL, 0x885B5000ULL }  /* shared -> io_fixed_code */
+#define R12_17 { 0x885EA0E8ULL, 0x88700000ULL }  /* io_fixed_code -> MM_MDSR */
+#define R12_18 { 0x88770000ULL, 0x88780000ULL }  /* MM_MDSR -> IO_MDSR */
+#define R12_19 { 0x887F1450ULL, 0x887FFC00ULL }  /* Layout -> driver param */
+#define R12_20 { 0x887FFE98ULL, 0x88800000ULL }  /* driver param -> window end */
+/* Inside the two MDSR segments. A53 rewrites these rings continuously, so a
+ * spill here is overwritten within seconds. */
+#define R12_21 { 0x88701000ULL, 0x88770000ULL }  /* core0 ring in MM_MDSR */
+#define R12_22 { 0x88781000ULL, 0x887F0000ULL }  /* core1 ring in IO_MDSR */
 #define R61_0 { 0x885EA0E8ULL, 0x88700000ULL }
 #define R61_1 { 0x88701000ULL, 0x88770000ULL }
 #define R61_2 { 0x88781000ULL, 0x887E0000ULL }
 
 static const struct builtin g_builtin[] = {
     { "12.00", 0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
-      0x885EA0E8ULL, 0x88700000ULL, 4, { R12_0, R12_1, R12_2, R12_3 } },
+      0x885EA0E8ULL, 0x88700000ULL, 23,
+      { R12_00, R12_01, R12_02, R12_03, R12_04, R12_05, R12_06,
+        R12_07, R12_08, R12_09, R12_10, R12_11, R12_12,
+        R12_13, R12_14, R12_15, R12_16, R12_17,
+        R12_18, R12_19, R12_20, R12_21, R12_22 } },
     { "7.61",  0x88700000ULL, 0x60700000ULL, 0x88100000ULL, 0x171140ULL,
       0x885EA0E8ULL, 0x88700000ULL, 3, { R61_0, R61_1, R61_2 } },
 };
