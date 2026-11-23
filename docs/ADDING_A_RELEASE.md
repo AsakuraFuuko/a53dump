@@ -81,6 +81,7 @@ wrong `DS_PA` is caught immediately; gate 2 computes the landing point from
 | 4.50 | `0x111100` |
 | 5.10 … 7.61 | `0x1212F8` |
 | 12.00 | `0x171140` |
+| 13.60 | `0x171140` |
 
 For `IMAGE`, prefer these sources in order:
 
@@ -147,11 +148,11 @@ but a right `DS` with a wrong `RANGE` would let `one` read memory it should not.
 
 ---
 
-## Known risks past 12.00
+## Known risks past 13.60
 
 | Risk | Evidence | Impact |
 |---|---|---|
-| Address-window validator | 13.60 adds `0x2951C`; 12.00 has no such function. It checks an address against a descriptor table of windows. | may reject reads that cross windows |
+| Address-window validator | 13.60 adds `0x2951C`; 12.00 has no such function. It checks an address against a descriptor table of windows. | **none on 13.60** (`one` and `elfmeta` succeeded); may still affect future releases |
 | Handler relocation | `0x01190201` handler: `0x1123E4` (4.02) → `0x111C60` (5.10) → `0x111AE0` (7.61) → `0x111764` (12.00) | **none** — the dumper never calls a handler by address |
 | Command table location | `0x1221D8` (4.02) → `0x11F1D8` (7.61) → `0x11F1E0` (12.00) | **none** — the dumper does not read the table |
 

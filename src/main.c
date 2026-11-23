@@ -129,13 +129,45 @@ static uint32_t rd32(const uint8_t *p, size_t off) {
            ((uint32_t)p[off + 2] << 16) | ((uint32_t)p[off + 3] << 24);
 }
 
-/* Direct-map offset for the host side of the A53 DRAM window. */
+/* Direct-map offset for the host side of the A53 DRAM window.
+ *
+ * Path 1: proc0 -> vm_pmap (version-independent, needs SDK offsets).
+ * Path 2: kernel_pmap_store via known per-firmware offset (fallback). */
 static uint64_t dmap_from_kdata(void) {
+    /* Path 1: proc0 -> p_vmspace -> vm_pmap.  Works on any firmware the SDK
+     * has offsets for, without hardcoding kernel_pmap_store addresses. */
+    uint64_t proc = (uint64_t)(uintptr_t)kernel_get_proc(0);
+    if (proc) {
+        uint64_t vmspace = kread64(proc + KERNEL_OFFSET_PROC_P_VMSPACE);
+        if (vmspace && vmspace != ~0ULL) {
+            uint64_t hi = kread64(vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP + 0x20);
+            uint64_t lo = kread64(vmspace + KERNEL_OFFSET_VMSPACE_VM_PMAP + 0x28);
+            if (hi != ~0ULL && lo != ~0ULL && hi > lo)
+                return hi - lo;
+        }
+    }
+
+    /* Path 2: kernel_pmap_store at a known offset from KERNEL_ADDRESS_DATA_BASE.
+     * The offset and the data-text gap both vary by firmware. */
     uint64_t data = (uint64_t)(uintptr_t)KERNEL_ADDRESS_DATA_BASE;
     uint64_t text = (uint64_t)(uintptr_t)KERNEL_ADDRESS_TEXT_BASE;
-    if (!data || data <= text) data = text + 0x0D50000ULL;
-    uint64_t hi = kread64(data + 0x2e1cfb8ULL + 0x20);
-    uint64_t lo = kread64(data + 0x2e1cfb8ULL + 0x28);
+    uint64_t pmap_off = 0;
+    switch (kernel_get_fw_version() & 0xffff0000U) {
+    case 0x12000000U:
+    case 0x12020000U:
+        if (!data || data <= text) data = text + 0x0D50000ULL;
+        pmap_off = 0x2e1cfb8ULL;
+        break;
+    case 0x13600000U:
+        if (!data || data <= text) data = text + 0x0CC0000ULL;
+        pmap_off = 0x2E88FF8ULL;
+        break;
+    default:
+        return 0;
+    }
+
+    uint64_t hi = kread64(data + pmap_off + 0x20);
+    uint64_t lo = kread64(data + pmap_off + 0x28);
     if (hi == ~0ULL || lo == ~0ULL) return 0;
     return hi - lo;
 }

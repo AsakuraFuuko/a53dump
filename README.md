@@ -6,10 +6,12 @@ Dump the `a53.elf` image that runs on the PS5's A53 coprocessor, using a single
 SDBGP command that the host can steer without supplying an address.
 
 - **License:** GPL-3.0-or-later — required, not chosen. See [Credits](#credits).
-- **Verified on:** firmware 12.00 only.
-- **Live result:** all 22 segments of the A53 memory map, 3,862,709 bytes, every
-  length exactly matching the console's own layout table. The `.elf` alone is
-  1,511,744 bytes and parses with `readelf` (17 program headers).
+- **Verified on:** firmware 12.00 and 13.60.
+- **Live results:** all 22 segments of the A53 memory map, every length exactly
+  matching the console's own layout table. The `.elf` is 1,511,744 bytes on both
+  builds and parses with `readelf` (17 program headers).
+  - `12.00`: `sha256 4f3411746d0fd3826c80eefeb4eed1ecea2e632eca377ac015c0d6a6d062f241`
+  - `13.60`: `sha256 94cbeb0a72a2a41650fac8d3858261ce6f33e480e3c0e841d72fddd0ddff576f`
 
 ---
 
@@ -38,7 +40,7 @@ read_len  = last
 ```
 
 Everything else is version independent and was checked across the builds
-examined (4.02 … 7.61 … 12.00): the command id, the MDSR field offsets, the
+examined (4.02 … 7.61 … 12.00 … 13.60): the command id, the MDSR field offsets, the
 `deci5s_memory_arg` wire format, the response layout (`+0x60` text length,
 `+0x68` payload), and the transport discovery chain
 (`mp4sc + 0x18` → bushandle `+0x10` → `zcn_bar2`).
